@@ -1,0 +1,225 @@
+"""OpenRouter client implementation."""
+
+import json
+from typing import Any, AsyncIterator, Dict, List, Optional
+
+try:
+    from openai import AsyncOpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+from ..core.client import ModelClient
+from ..core.message import Message, MessageRole
+from ..core.metrics import TokenCount
+from ..core.exceptions import ProviderError, AuthenticationError, ModelError
+
+
+class OpenRouterClient(ModelClient):
+    """OpenRouter client implementation using OpenAI-compatible API."""
+    
+    def __init__(
+        self,
+        model: str,
+        api_key: Optional[str] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        app_name: Optional[str] = None,
+        app_url: Optional[str] = None,
+        **kwargs
+    ):
+        if not OPENAI_AVAILABLE:
+            raise ImportError(
+                "openai is required for OpenRouter. Install with: pip install openai"
+            )
+        
+        super().__init__(model, api_key, timeout, max_retries, **kwargs)
+        
+        if not api_key:
+            raise AuthenticationError("OpenRouter API key is required", provider="openrouter")
+        
+        # Prepare headers for OpenRouter
+        headers = {}
+        if app_name:
+            headers["HTTP-Referer"] = app_url or "https://localhost"
+            headers["X-Title"] = app_name
+        
+        # Initialize OpenRouter client using OpenAI SDK with custom base URL
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            timeout=timeout,
+            max_retries=max_retries,
+            default_headers=headers
+        )
+        
+        self.provider_name = "openrouter"
+    
+    def _convert_messages_to_openai_format(self, messages: List[Message]) -> List[Dict[str, Any]]:
+        """Convert messages to OpenAI format."""
+        openai_messages = []
+        
+        for message in messages:
+            openai_message = message.to_openai_format()
+            openai_messages.append(openai_message)
+        
+        return openai_messages
+    
+    async def chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ):
+        """Send chat completion request to OpenRouter."""
+        try:
+            openai_messages = self._convert_messages_to_openai_format(messages)
+            
+            # Prepare request parameters
+            request_params = {
+                "model": self.model,
+                "messages": openai_messages,
+                "temperature": temperature,
+                "stream": False,
+                **kwargs
+            }
+            
+            if max_tokens:
+                request_params["max_tokens"] = max_tokens
+            
+            if tools:
+                request_params["tools"] = tools
+                request_params["tool_choice"] = "auto"
+            
+            # Make API call
+            response = await self.client.chat.completions.create(**request_params)
+            
+            # Extract response content
+            content = response.choices[0].message.content or ""
+            
+            # Extract token usage
+            usage = TokenCount()
+            if response.usage:
+                usage = TokenCount(
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens
+                )
+            
+            # Create response message
+            response_message = Message(
+                role=MessageRole.ASSISTANT,
+                content=content,
+                tool_calls=response.choices[0].message.tool_calls
+            )
+            
+            from ..core.client import ChatResponse
+            return ChatResponse(
+                message=response_message,
+                usage=usage,
+                model=self.model,
+                provider=self.provider_name,
+                finish_reason=response.choices[0].finish_reason
+            )
+            
+        except Exception as e:
+            raise ProviderError(f"OpenRouter API error: {e}", provider="openrouter")
+    
+    async def stream_chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> AsyncIterator:
+        """Send streaming chat completion request to OpenRouter."""
+        try:
+            openai_messages = self._convert_messages_to_openai_format(messages)
+            
+            # Prepare request parameters
+            request_params = {
+                "model": self.model,
+                "messages": openai_messages,
+                "temperature": temperature,
+                "stream": True,
+                **kwargs
+            }
+            
+            if max_tokens:
+                request_params["max_tokens"] = max_tokens
+            
+            if tools:
+                request_params["tools"] = tools
+                request_params["tool_choice"] = "auto"
+            
+            # Stream response
+            response_stream = await self.client.chat.completions.create(**request_params)
+            
+            accumulated_content = ""
+            
+            async for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta:
+                    delta_content = chunk.choices[0].delta.content or ""
+                    accumulated_content += delta_content
+                    
+                    # Extract usage if available (usually in last chunk)
+                    usage = None
+                    if chunk.usage:
+                        usage = TokenCount(
+                            prompt_tokens=chunk.usage.prompt_tokens,
+                            completion_tokens=chunk.usage.completion_tokens,
+                            total_tokens=chunk.usage.total_tokens
+                        )
+                    
+                    from ..core.client import StreamChunk
+                    yield StreamChunk(
+                        content=accumulated_content,
+                        delta=delta_content,
+                        finish_reason=chunk.choices[0].finish_reason,
+                        usage=usage,
+                        tool_calls=chunk.choices[0].delta.tool_calls if hasattr(chunk.choices[0].delta, 'tool_calls') else None
+                    )
+            
+        except Exception as e:
+            raise ProviderError(f"OpenRouter streaming error: {e}", provider="openrouter")
+
+
+# Popular OpenRouter models (gateway to many providers)
+OPENROUTER_MODELS = {
+    # OpenAI models via OpenRouter
+    "openai/gpt-4o": "openai/gpt-4o",
+    "openai/gpt-4o-mini": "openai/gpt-4o-mini", 
+    "openai/gpt-4-turbo": "openai/gpt-4-turbo",
+    "openai/o1-preview": "openai/o1-preview",
+    "openai/o1-mini": "openai/o1-mini",
+    
+    # Anthropic models via OpenRouter
+    "anthropic/claude-3.5-sonnet": "anthropic/claude-3.5-sonnet",
+    "anthropic/claude-3-haiku": "anthropic/claude-3-haiku",
+    "anthropic/claude-3-opus": "anthropic/claude-3-opus",
+    
+    # Google models via OpenRouter
+    "google/gemini-pro-1.5": "google/gemini-pro-1.5",
+    "google/gemini-flash-1.5": "google/gemini-flash-1.5",
+    
+    # Meta Llama models
+    "meta-llama/llama-3.1-405b-instruct": "meta-llama/llama-3.1-405b-instruct",
+    "meta-llama/llama-3.1-70b-instruct": "meta-llama/llama-3.1-70b-instruct",
+    "meta-llama/llama-3.1-8b-instruct": "meta-llama/llama-3.1-8b-instruct",
+    
+    # Mistral models
+    "mistralai/mixtral-8x7b-instruct": "mistralai/mixtral-8x7b-instruct",
+    "mistralai/mistral-7b-instruct": "mistralai/mistral-7b-instruct",
+    
+    # Other popular models
+    "qwen/qwen-2.5-72b-instruct": "qwen/qwen-2.5-72b-instruct",
+    "microsoft/wizardlm-2-8x22b": "microsoft/wizardlm-2-8x22b",
+    "nvidia/llama-3.1-nemotron-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+    
+    # Free models (good for testing)
+    "meta-llama/llama-3.2-3b-instruct:free": "meta-llama/llama-3.2-3b-instruct:free",
+    "qwen/qwen-2-7b-instruct:free": "qwen/qwen-2-7b-instruct:free",
+}

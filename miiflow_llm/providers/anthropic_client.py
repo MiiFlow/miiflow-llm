@@ -1,0 +1,188 @@
+"""Anthropic provider implementation."""
+
+import asyncio
+from typing import Any, AsyncIterator, Dict, List, Optional
+
+import anthropic
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from ..core.client import ModelClient, ChatResponse, StreamChunk
+from ..core.message import Message, MessageRole
+from ..core.metrics import TokenCount, UsageData
+from ..core.exceptions import (
+    AuthenticationError,
+    RateLimitError,
+    ModelError,
+    TimeoutError as MiiFlowTimeoutError,
+    ProviderError,
+)
+
+
+class AnthropicClient(ModelClient):
+    """Anthropic provider client."""
+    
+    def __init__(self, model: str, api_key: Optional[str] = None, **kwargs):
+        super().__init__(model=model, api_key=api_key, **kwargs)
+        self.client = anthropic.AsyncAnthropic(api_key=api_key)
+        self.provider_name = "anthropic"
+    
+    def _prepare_messages(self, messages: List[Message]) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        """Prepare messages for Anthropic format (system separate)."""
+        system_content = None
+        anthropic_messages = []
+        
+        for msg in messages:
+            if msg.role == MessageRole.SYSTEM:
+                system_content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            else:
+                anthropic_messages.append(msg.to_anthropic_format())
+        
+        return system_content, anthropic_messages
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    async def chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> ChatResponse:
+        """Send chat completion request to Anthropic."""
+        try:
+            system_content, anthropic_messages = self._prepare_messages(messages)
+            
+            request_params = {
+                "model": self.model,
+                "messages": anthropic_messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens or 1024,
+            }
+            
+            if system_content:
+                request_params["system"] = system_content
+            if tools:
+                request_params["tools"] = tools
+            
+            response = await asyncio.wait_for(
+                self.client.messages.create(**request_params),
+                timeout=self.timeout
+            )
+            
+            # Extract content
+            content = ""
+            if response.content:
+                for block in response.content:
+                    if hasattr(block, 'text'):
+                        content += block.text
+            
+            # Create response message
+            response_message = Message(
+                role=MessageRole.ASSISTANT,
+                content=content,
+                tool_calls=getattr(response, 'tool_calls', None)
+            )
+            
+            # Extract usage
+            usage = TokenCount(
+                prompt_tokens=response.usage.input_tokens,
+                completion_tokens=response.usage.output_tokens,
+                total_tokens=response.usage.input_tokens + response.usage.output_tokens
+            )
+            
+            return ChatResponse(
+                message=response_message,
+                usage=usage,
+                model=self.model,
+                provider=self.provider_name,
+                finish_reason=response.stop_reason,
+                metadata={"response_id": response.id}
+            )
+            
+        except anthropic.AuthenticationError as e:
+            raise AuthenticationError(str(e), self.provider_name, original_error=e)
+        except anthropic.RateLimitError as e:
+            raise RateLimitError(str(e), self.provider_name, original_error=e)
+        except anthropic.BadRequestError as e:
+            raise ModelError(str(e), self.model, original_error=e)
+        except asyncio.TimeoutError as e:
+            raise MiiFlowTimeoutError("Request timed out", self.timeout, original_error=e)
+        except Exception as e:
+            raise ProviderError(f"Anthropic API error: {str(e)}", self.provider_name, original_error=e)
+    
+    async def stream_chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> AsyncIterator[StreamChunk]:
+        """Send streaming chat completion request to Anthropic."""
+        try:
+            system_content, anthropic_messages = self._prepare_messages(messages)
+            
+            request_params = {
+                "model": self.model,
+                "messages": anthropic_messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens or 1024,
+                "stream": True,
+            }
+            
+            if system_content:
+                request_params["system"] = system_content
+            if tools:
+                request_params["tools"] = tools
+            
+            stream = await asyncio.wait_for(
+                self.client.messages.create(**request_params),
+                timeout=self.timeout
+            )
+            
+            accumulated_content = ""
+            final_usage = None
+            
+            async for event in stream:
+                if event.type == "content_block_start":
+                    continue
+                elif event.type == "content_block_delta":
+                    if hasattr(event.delta, 'text'):
+                        content_delta = event.delta.text
+                        accumulated_content += content_delta
+                        
+                        yield StreamChunk(
+                            content=accumulated_content,
+                            delta=content_delta,
+                            finish_reason=None,
+                            usage=None,
+                            tool_calls=None
+                        )
+                elif event.type == "content_block_stop":
+                    continue
+                elif event.type == "message_delta":
+                    if hasattr(event.delta, 'stop_reason'):
+                        yield StreamChunk(
+                            content=accumulated_content,
+                            delta="",
+                            finish_reason=event.delta.stop_reason,
+                            usage=None,
+                            tool_calls=None
+                        )
+                elif event.type == "message_stop":
+                    break
+            
+        except anthropic.AuthenticationError as e:
+            raise AuthenticationError(str(e), self.provider_name, original_error=e)
+        except anthropic.RateLimitError as e:
+            raise RateLimitError(str(e), self.provider_name, original_error=e)
+        except anthropic.BadRequestError as e:
+            raise ModelError(str(e), self.model, original_error=e)
+        except asyncio.TimeoutError as e:
+            raise MiiFlowTimeoutError("Streaming request timed out", self.timeout, original_error=e)
+        except Exception as e:
+            raise ProviderError(f"Anthropic streaming error: {str(e)}", self.provider_name, original_error=e)

@@ -72,6 +72,7 @@ Thumbs.db
 
 # Project specific
 *.log
+.env
 .env.local
 .env.development
 .env.test
