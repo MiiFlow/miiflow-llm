@@ -512,21 +512,17 @@ class UnifiedStreamingClient:
         
         try:
             async for raw_chunk in self.client.stream_chat(messages, **kwargs):
-                # Step 1: Normalize the chunk
                 normalized = self.normalizer.normalize_chunk(
                     raw_chunk, 
                     self.client.provider_name
                 )
                 
-                # Step 2: Accumulate content
                 buffer += normalized.content
                 
-                # Step 3: Try incremental parsing if schema provided
                 partial_parse = None
                 if parser and normalized.content:
                     partial_parse = parser.try_parse_partial(normalized.content)
                 
-                # Step 4: Yield enhanced chunk
                 yield EnhancedStreamChunk(
                     content=buffer,
                     delta=normalized.content,
@@ -542,11 +538,9 @@ class UnifiedStreamingClient:
                     }
                 )
                 
-                # Break if stream is complete
                 if normalized.is_complete:
                     break
             
-            # Final parsing attempt
             if parser and buffer:
                 final_result = parser.finalize_parse(buffer)
                 yield EnhancedStreamChunk(
@@ -561,7 +555,6 @@ class UnifiedStreamingClient:
                 )
                 
         except Exception as e:
-            # Yield error information
             yield EnhancedStreamChunk(
                 content="",
                 delta="",

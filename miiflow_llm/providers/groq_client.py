@@ -60,18 +60,15 @@ class GroqClient(ModelClient):
                 timeout=self.timeout
             )
             
-            # Extract response data
             choice = response.choices[0]
             content = choice.message.content or ""
             
-            # Create response message
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content,
                 tool_calls=choice.message.tool_calls
             )
             
-            # Extract usage (Groq compatible)
             usage = TokenCount(
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens,
@@ -137,13 +134,11 @@ class GroqClient(ModelClient):
                 choice = chunk.choices[0]
                 delta = choice.delta
                 
-                # Extract content delta (normalize Groq format to unified format)
                 content_delta = ""
                 if delta.content:
                     content_delta = delta.content
                     accumulated_content += content_delta
                 
-                # Extract usage if available
                 usage = None
                 if chunk.usage:
                     usage = TokenCount(
@@ -153,12 +148,10 @@ class GroqClient(ModelClient):
                     )
                     final_usage = usage
                 
-                # Extract tool calls
                 tool_calls = None
                 if delta.tool_calls:
                     tool_calls = delta.tool_calls
                 
-                # Return unified StreamChunk regardless of Groq's internal format
                 yield StreamChunk(
                     content=accumulated_content,
                     delta=content_delta,

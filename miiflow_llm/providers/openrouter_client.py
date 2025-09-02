@@ -44,7 +44,6 @@ class OpenRouterClient(ModelClient):
             headers["HTTP-Referer"] = app_url or "https://localhost"
             headers["X-Title"] = app_name
         
-        # Initialize OpenRouter client using OpenAI SDK with custom base URL
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
@@ -77,7 +76,6 @@ class OpenRouterClient(ModelClient):
         try:
             openai_messages = self._convert_messages_to_openai_format(messages)
             
-            # Prepare request parameters
             request_params = {
                 "model": self.model,
                 "messages": openai_messages,
@@ -93,13 +91,10 @@ class OpenRouterClient(ModelClient):
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
             
-            # Make API call
             response = await self.client.chat.completions.create(**request_params)
             
-            # Extract response content
             content = response.choices[0].message.content or ""
             
-            # Extract token usage
             usage = TokenCount()
             if response.usage:
                 usage = TokenCount(
@@ -108,7 +103,6 @@ class OpenRouterClient(ModelClient):
                     total_tokens=response.usage.total_tokens
                 )
             
-            # Create response message
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content,
@@ -139,7 +133,6 @@ class OpenRouterClient(ModelClient):
         try:
             openai_messages = self._convert_messages_to_openai_format(messages)
             
-            # Prepare request parameters
             request_params = {
                 "model": self.model,
                 "messages": openai_messages,
@@ -155,7 +148,6 @@ class OpenRouterClient(ModelClient):
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
             
-            # Stream response
             response_stream = await self.client.chat.completions.create(**request_params)
             
             accumulated_content = ""
@@ -165,7 +157,6 @@ class OpenRouterClient(ModelClient):
                     delta_content = chunk.choices[0].delta.content or ""
                     accumulated_content += delta_content
                     
-                    # Extract usage if available (usually in last chunk)
                     usage = None
                     if chunk.usage:
                         usage = TokenCount(

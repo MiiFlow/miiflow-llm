@@ -1,23 +1,23 @@
 # MiiFlow LLM
 
-**Production-ready unified LLM API layer** that solves streaming inconsistencies and provides a single interface across 9 providers.
+Unified abstraction layer for large language model providers addressing streaming interface inconsistencies and provider-specific API variations.
 
 [![Tests](https://img.shields.io/badge/tests-78%20passed-brightgreen)](tests/)
 [![Providers](https://img.shields.io/badge/providers-9%20supported-blue)](#supported-providers)
 [![Coverage](https://img.shields.io/badge/streaming-unified-orange)](#streaming-interface)
 
-## 🎯 Problem Solved
+## Problem Statement
 
-**GPT-5 Streaming Inconsistency Crisis:**
+Current LLM integrations suffer from inconsistent streaming response formats across providers:
 - **GPT-4**: Uses `response_gen` iterator
 - **GPT-5**: Uses `chunk.delta` attributes  
 - **Claude**: Uses `chunk.message.content`
 - **Groq**: Requires `str(chunk)` fallback
-- **Result**: Broken code when switching providers
+- **Result**: Breaking changes when switching providers
 
-**MiiFlow LLM Solution:** Single `StreamChunk` format across ALL providers ✅
+**Solution:** Unified `StreamChunk` format with provider abstraction layer.
 
-## 🚀 Quick Start
+## Usage
 
 ```python
 from miiflow_llm import LLMClient
@@ -34,21 +34,21 @@ async for chunk in client.stream_chat(messages):
     print(chunk.delta, end="")  # Same format everywhere!
 ```
 
-## ✅ Supported Providers (9 Total)
+## Supported Providers
 
 | Provider | Models | Status | Streaming |
 |----------|--------|--------|-----------|
-| **OpenAI** | GPT-4, GPT-4o, **GPT-5** | ✅ | ✅ |
-| **Anthropic** | Claude 3, Claude 3.5 Sonnet | ✅ | ✅ |
-| **Google** | Gemini 1.5 Pro, Flash, Flash-8B | ✅ | ✅ |
-| **Groq** | Llama 3.1, Llama 3.3, Mixtral | ✅ | ✅ |
-| **xAI** | Grok Beta | ✅ | ✅ |
-| **TogetherAI** | Meta Llama, Mixtral, Nous | ✅ | ✅ |
-| **OpenRouter** | 200+ models, Free tier | ✅ | ✅ |
-| **Mistral** | Mistral Small, Large | ✅ | ✅ |
-| **Ollama** | Local models (Llama, etc.) | ✅ | ✅ |
+| **OpenAI** | GPT-4, GPT-4o, GPT-5 | Active | Yes |
+| **Anthropic** | Claude 3, Claude 3.5 Sonnet | Active | Yes |
+| **Google** | Gemini 1.5 Pro, Flash, Flash-8B | Active | Yes |
+| **Groq** | Llama 3.1, Llama 3.3, Mixtral | Active | Yes |
+| **xAI** | Grok Beta | Active | Yes |
+| **TogetherAI** | Meta Llama, Mixtral, Nous | Active | Yes |
+| **OpenRouter** | 200+ models, Free tier | Active | Yes |
+| **Mistral** | Mistral Small, Large | Active | Yes |
+| **Ollama** | Local models (Llama, etc.) | Active | Yes |
 
-## 🏗️ Architecture
+## Architecture
 
 ### 1. Unified Streaming Layer
 ```python
@@ -80,7 +80,7 @@ message = Message.user([
 ])
 ```
 
-## 🔧 Advanced Features
+## Advanced Features
 
 ### Structured Output with Streaming
 ```python
@@ -123,7 +123,7 @@ except ProviderError as e:
     print(f"Provider {e.provider} error: {e.message}")
 ```
 
-## 🧪 Testing & Reliability
+## Testing & Reliability
 
 **Comprehensive Test Suite: 78 tests passing**
 - **Provider Adapters**: Unit tests for all 9 providers
@@ -133,11 +133,11 @@ except ProviderError as e:
 - **Integration**: End-to-end testing with real provider patterns
 
 ```bash
-python -m pytest tests/  # 78 passed, 0 failed ✅
+python -m pytest tests/  # 78 passed, 0 failed
 python test_unified_streaming.py  # Integration test
 ```
 
-## 📦 Installation & Setup
+## Installation & Setup
 
 ```bash
 pip install -r requirements.txt
@@ -161,7 +161,177 @@ MISTRAL_API_KEY=...  # Optional
 # OLLAMA_API_KEY not needed for local usage
 ```
 
-## 🎯 Use Cases
+## Integration with MiiFlow Web
+
+### Installation in MiiFlow Web Project
+
+```bash
+# In your miiflow-web project directory
+pip install -e ../miiflow-llm  # Local development
+# OR
+pip install git+https://github.com/MiiFlow/miiflow-llm.git  # Latest from GitHub
+```
+
+### Backend Integration
+
+```python
+# In your FastAPI/Django backend
+from miiflow_llm import LLMClient
+from miiflow_llm.core import Message
+
+# Create a service layer for LLM operations
+class LLMService:
+    def __init__(self):
+        self.clients = {}
+    
+    def get_client(self, provider: str, model: str) -> LLMClient:
+        """Get or create LLM client for provider/model combination."""
+        key = f"{provider}:{model}"
+        if key not in self.clients:
+            self.clients[key] = LLMClient.create(provider, model=model)
+        return self.clients[key]
+    
+    async def chat_completion(self, provider: str, model: str, messages: list) -> dict:
+        """Handle chat completion request from frontend."""
+        client = self.get_client(provider, model)
+        
+        # Convert dict messages to Message objects
+        llm_messages = [Message.user(msg['content']) for msg in messages if msg['role'] == 'user']
+        
+        response = await client.chat(llm_messages)
+        
+        return {
+            'content': response.message.content,
+            'provider': response.provider,
+            'model': response.model,
+            'usage': {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens
+            }
+        }
+    
+    async def stream_completion(self, provider: str, model: str, messages: list):
+        """Handle streaming completion for real-time responses."""
+        client = self.get_client(provider, model)
+        llm_messages = [Message.user(msg['content']) for msg in messages if msg['role'] == 'user']
+        
+        async for chunk in client.stream_chat(llm_messages):
+            yield {
+                'delta': chunk.delta,
+                'content': chunk.content,
+                'finish_reason': chunk.finish_reason
+            }
+
+# FastAPI endpoint example
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+
+app = FastAPI()
+llm_service = LLMService()
+
+@app.post("/api/chat")
+async def chat_endpoint(request: dict):
+    """Standard chat completion endpoint."""
+    return await llm_service.chat_completion(
+        provider=request['provider'],
+        model=request['model'], 
+        messages=request['messages']
+    )
+
+@app.post("/api/chat/stream")
+async def stream_endpoint(request: dict):
+    """Streaming chat completion endpoint."""
+    return StreamingResponse(
+        llm_service.stream_completion(
+            provider=request['provider'],
+            model=request['model'],
+            messages=request['messages']
+        ),
+        media_type="text/plain"
+    )
+```
+
+### Frontend Integration
+
+```javascript
+// In your React/Vue/Angular frontend
+class LLMClient {
+    constructor(baseUrl = '/api') {
+        this.baseUrl = baseUrl;
+    }
+    
+    async chat(provider, model, messages) {
+        const response = await fetch(`${this.baseUrl}/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, model, messages })
+        });
+        return response.json();
+    }
+    
+    async* streamChat(provider, model, messages) {
+        const response = await fetch(`${this.baseUrl}/chat/stream`, {
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, model, messages })
+        });
+        
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunk = JSON.parse(decoder.decode(value));
+            yield chunk;
+        }
+    }
+}
+
+// Usage in React component
+const llmClient = new LLMClient();
+
+// Standard completion
+const response = await llmClient.chat('openai', 'gpt-4o', [
+    { role: 'user', content: 'Hello!' }
+]);
+
+// Streaming completion
+for await (const chunk of llmClient.streamChat('openai', 'gpt-4o', messages)) {
+    console.log(chunk.delta); // Real-time response
+}
+```
+
+### Configuration for MiiFlow Web
+
+```python
+# settings.py or config.py
+MIIFLOW_LLM_CONFIG = {
+    'default_provider': 'openai',
+    'default_model': 'gpt-4o',
+    'timeout': 60.0,
+    'max_retries': 3,
+    'enable_metrics': True,
+    'providers': {
+        'openai': {
+            'models': ['gpt-4o', 'gpt-4o-mini', 'gpt-5'],
+            'default_temperature': 0.7
+        },
+        'anthropic': {
+            'models': ['claude-3-5-sonnet-20241022', 'claude-3-haiku-20240307'],
+            'default_temperature': 0.7
+        },
+        'groq': {
+            'models': ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
+            'default_temperature': 0.7
+        }
+    }
+}
+```
+
+## Use Cases
 
 - **Multi-provider Applications**: Switch between providers without code changes
 - **A/B Testing**: Compare model performance across providers  
@@ -169,18 +339,18 @@ MISTRAL_API_KEY=...  # Optional
 - **Cost Optimization**: Route to cheapest provider for each request
 - **GPT-5 Migration**: Seamless upgrade from GPT-4 without refactoring
 
-## 🏆 Key Benefits
+## Key Benefits
 
-✅ **Eliminates GPT-5 streaming inconsistency**  
-✅ **Single API across 9 providers**  
-✅ **Production-ready error handling**  
-✅ **Comprehensive test coverage (78 tests)**  
-✅ **Multi-modal support (text + images)**  
-✅ **Structured output streaming**  
-✅ **Built-in metrics & observability**  
-✅ **Local model support (Ollama)**  
+- **Eliminates GPT-5 streaming inconsistency**  
+- **Single API across 9 providers**  
+- **Production-ready error handling**  
+- **Comprehensive test coverage (78 tests)**  
+- **Multi-modal support (text + images)**  
+- **Structured output streaming**  
+- **Built-in metrics & observability**  
+- **Local model support (Ollama)**  
 
-## 🔮 Future Roadmap
+## Future Roadmap
 
 - **Function Calling**: Unified tool interface across providers
 - **Batch Processing**: Efficient bulk request handling  

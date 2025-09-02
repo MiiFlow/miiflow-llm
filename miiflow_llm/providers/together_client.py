@@ -36,7 +36,6 @@ class TogetherClient(ModelClient):
         if not api_key:
             raise AuthenticationError("TogetherAI API key is required", provider="together")
         
-        # Initialize TogetherAI client using OpenAI SDK with custom base URL
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://api.together.xyz/v1",
@@ -68,7 +67,6 @@ class TogetherClient(ModelClient):
         try:
             openai_messages = self._convert_messages_to_openai_format(messages)
             
-            # Prepare request parameters
             request_params = {
                 "model": self.model,
                 "messages": openai_messages,
@@ -84,13 +82,10 @@ class TogetherClient(ModelClient):
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
             
-            # Make API call
             response = await self.client.chat.completions.create(**request_params)
             
-            # Extract response content
             content = response.choices[0].message.content or ""
             
-            # Extract token usage
             usage = TokenCount()
             if response.usage:
                 usage = TokenCount(
@@ -99,7 +94,6 @@ class TogetherClient(ModelClient):
                     total_tokens=response.usage.total_tokens
                 )
             
-            # Create response message
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content,
@@ -130,7 +124,6 @@ class TogetherClient(ModelClient):
         try:
             openai_messages = self._convert_messages_to_openai_format(messages)
             
-            # Prepare request parameters
             request_params = {
                 "model": self.model,
                 "messages": openai_messages,
@@ -146,7 +139,6 @@ class TogetherClient(ModelClient):
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
             
-            # Stream response
             response_stream = await self.client.chat.completions.create(**request_params)
             
             accumulated_content = ""
@@ -156,7 +148,6 @@ class TogetherClient(ModelClient):
                     delta_content = chunk.choices[0].delta.content or ""
                     accumulated_content += delta_content
                     
-                    # Extract usage if available (usually in last chunk)
                     usage = None
                     if chunk.usage:
                         usage = TokenCount(

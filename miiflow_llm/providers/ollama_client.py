@@ -37,12 +37,7 @@ class OllamaClient(ModelClient):
         self.base_url = base_url.rstrip('/')
         self.provider_name = "ollama"
         
-        # Ollama doesn't typically require API keys for local use
-        # But some deployments might - we'll allow None for local usage
         self.api_key = api_key
-        
-        # Don't raise authentication error for Ollama when no API key
-        # (it's normal for local usage)
     
     def _convert_messages_to_ollama_format(self, messages: List[Message]) -> List[Dict[str, Any]]:
         """Convert messages to Ollama format."""
@@ -79,7 +74,6 @@ class OllamaClient(ModelClient):
             else:
                 ollama_message["content"] = str(message.content)
             
-            # Add tool calls if present (Ollama has limited tool support)
             if message.tool_calls:
                 ollama_message["tool_calls"] = message.tool_calls
             
@@ -136,7 +130,6 @@ class OllamaClient(ModelClient):
             # Extract response content
             content = result.get("message", {}).get("content", "")
             
-            # Ollama doesn't provide detailed token usage, so we estimate
             usage = TokenCount(
                 input_tokens=sum(len(msg.get("content", "").split()) for msg in ollama_messages),
                 output_tokens=len(content.split()),

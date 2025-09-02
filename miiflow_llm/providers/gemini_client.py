@@ -47,7 +47,6 @@ class GeminiClient(ModelClient):
         except Exception as e:
             raise ModelError(f"Failed to initialize Gemini model {model}: {e}")
         
-        # Safety settings to be more permissive for general use
         self.safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -63,7 +62,6 @@ class GeminiClient(ModelClient):
         
         for message in messages:
             if message.role == MessageRole.SYSTEM:
-                # Gemini doesn't have system messages, prepend to first user message
                 if gemini_messages and gemini_messages[-1]["role"] == "user":
                     gemini_messages[-1]["parts"][0]["text"] = f"System: {message.content}\n\n{gemini_messages[-1]['parts'][0]['text']}"
                 else:
@@ -140,7 +138,6 @@ class GeminiClient(ModelClient):
             else:
                 content = ""
             
-            # Extract token usage (Gemini provides token counts)
             usage = TokenCount()
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
                 usage = TokenCount(
@@ -149,7 +146,6 @@ class GeminiClient(ModelClient):
                     total_tokens=getattr(response.usage_metadata, 'total_token_count', 0)
                 )
             
-            # Create response message
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content
@@ -212,7 +208,6 @@ class GeminiClient(ModelClient):
                 if chunk.candidates and chunk.candidates[0].content.parts:
                     content = chunk.candidates[0].content.parts[0].text
                     
-                    # Update token count if available
                     if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
                         total_tokens = TokenCount(
                             prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0),

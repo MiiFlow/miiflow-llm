@@ -67,7 +67,6 @@ class MistralClient(ModelClient):
             if isinstance(message.content, str):
                 content = message.content
             elif isinstance(message.content, list):
-                # For multi-modal content, extract text (Mistral has limited vision support)
                 content_parts = []
                 for block in message.content:
                     if isinstance(block, TextBlock):
@@ -189,7 +188,6 @@ class MistralClient(ModelClient):
                     delta_content = chunk.choices[0].delta.content or ""
                     accumulated_content += delta_content
                     
-                    # Extract usage if available (usually in last chunk)
                     usage = None
                     if hasattr(chunk, 'usage') and chunk.usage:
                         usage = TokenCount(

@@ -48,10 +48,8 @@ class OpenAIClient(ModelClient):
                 "messages": openai_messages,
             }
             
-            # GPT-5 models have specific parameter requirements
             if not self.model.startswith('gpt-5'):
                 request_params["temperature"] = temperature
-            # GPT-5 uses default temperature=1, other params may differ
             
             if max_tokens:
                 request_params["max_tokens"] = max_tokens
@@ -64,18 +62,15 @@ class OpenAIClient(ModelClient):
                 timeout=self.timeout
             )
             
-            # Extract response data
             choice = response.choices[0]
             content = choice.message.content or ""
             
-            # Create response message
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content,
                 tool_calls=choice.message.tool_calls
             )
             
-            # Extract usage
             usage = TokenCount(
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens,
@@ -146,13 +141,11 @@ class OpenAIClient(ModelClient):
                 choice = chunk.choices[0]
                 delta = choice.delta
                 
-                # Extract content delta
                 content_delta = ""
                 if delta.content:
                     content_delta = delta.content
                     accumulated_content += content_delta
                 
-                # Extract usage if available
                 usage = None
                 if chunk.usage:
                     usage = TokenCount(
@@ -162,7 +155,6 @@ class OpenAIClient(ModelClient):
                     )
                     final_usage = usage
                 
-                # Extract tool calls
                 tool_calls = None
                 if delta.tool_calls:
                     tool_calls = delta.tool_calls
