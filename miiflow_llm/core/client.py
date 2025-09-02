@@ -1,0 +1,295 @@
+"""Core LLM client interface and base implementations."""
+
+import time
+from abc import ABC, abstractmethod
+from typing import Any, AsyncIterator, Dict, List, Optional, Union, Type, Protocol, runtime_checkable
+from dataclasses import dataclass
+
+from .message import Message, MessageRole
+from .metrics import MetricsCollector, TokenCount, UsageData
+from .exceptions import MiiFlowLLMError, TimeoutError
+
+
+@dataclass
+class ChatResponse:
+    """Response from LLM chat completion."""
+    
+    message: Message
+    usage: TokenCount
+    model: str
+    provider: str
+    finish_reason: Optional[str] = None
+    metadata: Dict[str, Any] = None
+
+
+@dataclass
+class StreamChunk:
+    """Streaming response chunk."""
+    
+    content: str
+    delta: str
+    finish_reason: Optional[str] = None
+    usage: Optional[TokenCount] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+
+
+@runtime_checkable
+class ModelClientProtocol(Protocol):
+    """Protocol defining the interface for LLM provider clients."""
+    
+    model: str
+    api_key: Optional[str]
+    timeout: float
+    max_retries: int
+    metrics_collector: MetricsCollector
+    provider_name: str
+    
+    async def chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> ChatResponse:
+        """Send chat completion request."""
+        ...
+    
+    async def stream_chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> AsyncIterator[StreamChunk]:
+        """Send streaming chat completion request."""
+        ...
+
+
+class ModelClient(ABC):
+    """Abstract base class for LLM provider clients."""
+    
+    def __init__(
+        self,
+        model: str,
+        api_key: Optional[str] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        metrics_collector: Optional[MetricsCollector] = None,
+        **kwargs
+    ):
+        self.model = model
+        self.api_key = api_key
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.metrics_collector = metrics_collector or MetricsCollector()
+        self.provider_name = self.__class__.__name__.replace("Client", "").lower()
+    
+    @abstractmethod
+    async def chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> ChatResponse:
+        """Send chat completion request."""
+        pass
+    
+    @abstractmethod
+    async def stream_chat(
+        self,
+        messages: List[Message],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs
+    ) -> AsyncIterator[StreamChunk]:
+        """Send streaming chat completion request."""
+        pass
+    
+    def _record_metrics(self, usage: UsageData) -> None:
+        """Record usage metrics."""
+        if self.metrics_collector:
+            self.metrics_collector.record_usage(usage)
+
+
+class LLMClient:
+    """Main LLM client with provider management."""
+    
+    def __init__(
+        self,
+        client: ModelClient,
+        metrics_collector: Optional[MetricsCollector] = None
+    ):
+        self.client = client
+        self.metrics_collector = metrics_collector or MetricsCollector()
+        self.client.metrics_collector = self.metrics_collector
+        
+        # Initialize unified streaming client
+        self._unified_streaming_client = None
+    
+    @classmethod
+    def create(
+        cls,
+        provider: str,
+        model: str,
+        api_key: Optional[str] = None,
+        **kwargs
+    ) -> "LLMClient":
+        """Create client for specified provider."""
+        from ..providers import get_provider_client
+        from ..utils.env import load_env_file, get_api_key
+        
+        # Auto-load .env file
+        load_env_file()
+        
+        # Auto-get API key if not provided
+        if api_key is None:
+            api_key = get_api_key(provider)
+            # Ollama doesn't require API key for local usage
+            if api_key is None and provider.lower() != 'ollama':
+                raise ValueError(f"No API key found for {provider}. Set {provider.upper()}_API_KEY in .env or pass api_key parameter.")
+        
+        client = get_provider_client(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            **kwargs
+        )
+        
+        return cls(client)
+    
+    async def chat(
+        self,
+        messages: Union[List[Dict[str, Any]], List[Message]],
+        **kwargs
+    ) -> ChatResponse:
+        """Send chat completion request."""
+        normalized_messages = self._normalize_messages(messages)
+        
+        start_time = time.time()
+        try:
+            response = await self.client.chat(normalized_messages, **kwargs)
+            
+            # Record successful usage
+            self._record_usage(
+                normalized_messages,
+                response.usage,
+                time.time() - start_time,
+                success=True
+            )
+            
+            return response
+            
+        except Exception as e:
+            # Record failed usage
+            self._record_usage(
+                normalized_messages,
+                TokenCount(),
+                time.time() - start_time,
+                success=False
+            )
+            raise
+    
+    async def stream_chat(
+        self,
+        messages: Union[List[Dict[str, Any]], List[Message]],
+        **kwargs
+    ) -> AsyncIterator[StreamChunk]:
+        """Send streaming chat completion request."""
+        normalized_messages = self._normalize_messages(messages)
+        
+        start_time = time.time()
+        total_tokens = TokenCount()
+        
+        try:
+            async for chunk in self.client.stream_chat(normalized_messages, **kwargs):
+                if chunk.usage:
+                    total_tokens += chunk.usage
+                yield chunk
+            
+            # Record successful streaming usage
+            self._record_usage(
+                normalized_messages,
+                total_tokens,
+                time.time() - start_time,
+                success=True
+            )
+            
+        except Exception as e:
+            # Record failed streaming usage
+            self._record_usage(
+                normalized_messages,
+                total_tokens,
+                time.time() - start_time,
+                success=False
+            )
+            raise
+    
+    def _normalize_messages(self, messages: Union[List[Dict[str, Any]], List[Message]]) -> List[Message]:
+        """Normalize message format."""
+        if not messages:
+            return []
+        
+        if isinstance(messages[0], dict):
+            return [
+                Message(
+                    role=MessageRole(msg["role"]),
+                    content=msg["content"],
+                    name=msg.get("name"),
+                    tool_call_id=msg.get("tool_call_id"),
+                    tool_calls=msg.get("tool_calls")
+                )
+                for msg in messages
+            ]
+        
+        return messages
+    
+    def _record_usage(
+        self,
+        messages: List[Message],
+        tokens: TokenCount,
+        latency: float,
+        success: bool
+    ) -> None:
+        """Record usage metrics."""
+        usage = UsageData(
+            provider=self.client.provider_name,
+            model=self.client.model,
+            operation="chat",
+            tokens=tokens,
+            latency_ms=latency * 1000,
+            success=success,
+            metadata={
+                "message_count": len(messages),
+                "has_tools": any(msg.tool_calls for msg in messages),
+            }
+        )
+        
+        self.metrics_collector.record_usage(usage)
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get collected metrics."""
+        return self.metrics_collector.get_metrics()
+    
+    async def stream_with_schema(
+        self,
+        messages: Union[List[Dict[str, Any]], List[Message]],
+        schema: Optional[Type] = None,
+        **kwargs
+    ):
+        """Stream with structured output parsing support."""
+        from .streaming import UnifiedStreamingClient
+        
+        if self._unified_streaming_client is None:
+            self._unified_streaming_client = UnifiedStreamingClient(self.client)
+        
+        normalized_messages = self._normalize_messages(messages)
+        
+        async for chunk in self._unified_streaming_client.stream_with_schema(
+            normalized_messages, schema, **kwargs
+        ):
+            yield chunk
