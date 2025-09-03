@@ -16,6 +16,7 @@ from ..core.exceptions import (
     TimeoutError as MiiFlowTimeoutError,
     ProviderError,
 )
+from .stream_normalizer import get_stream_normalizer
 
 
 class AnthropicClient(ModelClient):
@@ -25,6 +26,7 @@ class AnthropicClient(ModelClient):
         super().__init__(model=model, api_key=api_key, **kwargs)
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
         self.provider_name = "anthropic"
+        self.stream_normalizer = get_stream_normalizer("anthropic")
     
     def _prepare_messages(self, messages: List[Message]) -> tuple[Optional[str], List[Dict[str, Any]]]:
         """Prepare messages for Anthropic format (system separate)."""

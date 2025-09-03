@@ -5,10 +5,8 @@ from .message import Message, MessageRole, ContentBlock, TextBlock, ImageBlock
 from .metrics import LLMMetrics, TokenCount, UsageData, MetricsCollector
 from .streaming import (
     UnifiedStreamingClient, 
-    ProviderStreamNormalizer, 
     IncrementalParser, 
-    EnhancedStreamChunk,
-    StreamContent
+    EnhancedStreamChunk
 )
 from .exceptions import (
     MiiFlowLLMError,
@@ -19,6 +17,17 @@ from .exceptions import (
     TimeoutError,
     ParsingError,
     ToolError,
+)
+from .tools import (
+    ToolRegistry,
+    ToolSchema,
+    ParameterSchema,
+    ToolType,
+    Observation,
+    tool,
+    FunctionTool,
+    HTTPTool,
+    BaseTool
 )
 
 __all__ = [
@@ -36,10 +45,8 @@ __all__ = [
     "UsageData",
     "MetricsCollector",
     "UnifiedStreamingClient", 
-    "ProviderStreamNormalizer", 
     "IncrementalParser", 
     "EnhancedStreamChunk",
-    "StreamContent",
     "MiiFlowLLMError",
     "ProviderError",
     "AuthenticationError", 
@@ -48,4 +55,13 @@ __all__ = [
     "TimeoutError",
     "ParsingError",
     "ToolError",
+    "ToolRegistry",
+    "ToolSchema",
+    "ParameterSchema",
+    "ToolType",
+    "Observation",
+    "tool",
+    "FunctionTool",
+    "HTTPTool",
+    "BaseTool",
 ]

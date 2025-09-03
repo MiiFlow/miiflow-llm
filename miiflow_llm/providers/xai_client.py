@@ -16,6 +16,7 @@ from ..core.exceptions import (
     TimeoutError as MiiFlowTimeoutError,
     ProviderError,
 )
+from .stream_normalizer import get_stream_normalizer
 
 
 class XAIClient(ModelClient):
@@ -28,6 +29,7 @@ class XAIClient(ModelClient):
             base_url="https://api.x.ai/v1"
         )
         self.provider_name = "xai"
+        self.stream_normalizer = get_stream_normalizer("xai")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -130,40 +132,22 @@ class XAIClient(ModelClient):
             )
             
             accumulated_content = ""
-            final_usage = None
             
             async for chunk in stream:
                 if not chunk.choices:
                     continue
-                    
-                choice = chunk.choices[0]
-                delta = choice.delta
                 
-                content_delta = ""
-                if delta.content:
-                    content_delta = delta.content
-                    accumulated_content += content_delta
+                # Use stream normalizer to convert XAI format to unified format
+                normalized_chunk = self.stream_normalizer.normalize(chunk)
                 
-                usage = None
-                if chunk.usage:
-                    usage = TokenCount(
-                        prompt_tokens=chunk.usage.prompt_tokens,
-                        completion_tokens=chunk.usage.completion_tokens,
-                        total_tokens=chunk.usage.total_tokens
-                    )
-                    final_usage = usage
+                # Accumulate content
+                if normalized_chunk.delta:
+                    accumulated_content += normalized_chunk.delta
                 
-                tool_calls = None
-                if delta.tool_calls:
-                    tool_calls = delta.tool_calls
+                # Update accumulated content in the chunk
+                normalized_chunk.content = accumulated_content
                 
-                yield StreamChunk(
-                    content=accumulated_content,
-                    delta=content_delta,
-                    finish_reason=choice.finish_reason,
-                    usage=usage,
-                    tool_calls=tool_calls
-                )
+                yield normalized_chunk
             
         except openai.AuthenticationError as e:
             raise AuthenticationError(str(e), self.provider_name, original_error=e)

@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import groq
 from groq import AsyncGroq
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -16,6 +17,7 @@ from ..core.exceptions import (
     TimeoutError as MiiFlowTimeoutError,
     ProviderError,
 )
+from .stream_normalizer import get_stream_normalizer
 
 
 class GroqClient(ModelClient):
@@ -25,6 +27,7 @@ class GroqClient(ModelClient):
         super().__init__(model=model, api_key=api_key, **kwargs)
         self.client = AsyncGroq(api_key=api_key)
         self.provider_name = "groq"
+        self.stream_normalizer = get_stream_normalizer("groq")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -84,16 +87,31 @@ class GroqClient(ModelClient):
                 metadata={"response_id": response.id}
             )
             
-        except Exception as e:
-            if "authentication" in str(e).lower():
-                raise AuthenticationError(str(e), self.provider_name, original_error=e)
-            elif "rate limit" in str(e).lower():
-                raise RateLimitError(str(e), self.provider_name, original_error=e)
-            elif "timeout" in str(e).lower():
-                raise MiiFlowTimeoutError("Request timed out", self.timeout, original_error=e)
+        except groq.AuthenticationError as e:
+            raise AuthenticationError(str(e), self.provider_name, original_error=e)
+        except groq.RateLimitError as e:
+            retry_after = getattr(e.response.headers, 'retry-after', None)
+            raise RateLimitError(str(e), self.provider_name, retry_after=retry_after, original_error=e)
+        except groq.BadRequestError as e:
+            raise ModelError(str(e), self.model, original_error=e)
+        except groq.APIConnectionError as e:
+            raise ProviderError(f"Groq connection error: {str(e)}", self.provider_name, original_error=e)
+        except asyncio.TimeoutError as e:
+            raise MiiFlowTimeoutError("Request timed out", self.timeout, original_error=e)
+        except groq.APIStatusError as e:
+            # Handle other HTTP status codes
+            if e.status_code >= 500:
+                raise ProviderError(f"Groq server error ({e.status_code}): {str(e)}", self.provider_name, original_error=e)
             else:
-                raise ProviderError(f"Groq API error: {str(e)}", self.provider_name, original_error=e)
+                raise ModelError(f"Groq API error ({e.status_code}): {str(e)}", self.model, original_error=e)
+        except Exception as e:
+            raise ProviderError(f"Groq API error: {str(e)}", self.provider_name, original_error=e)
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
     async def stream_chat(
         self,
         messages: List[Message],
@@ -125,47 +143,39 @@ class GroqClient(ModelClient):
             )
             
             accumulated_content = ""
-            final_usage = None
             
             async for chunk in stream:
                 if not chunk.choices:
                     continue
-                    
-                choice = chunk.choices[0]
-                delta = choice.delta
                 
-                content_delta = ""
-                if delta.content:
-                    content_delta = delta.content
-                    accumulated_content += content_delta
+                # Use stream normalizer to convert Groq format to unified format
+                normalized_chunk = self.stream_normalizer.normalize(chunk)
                 
-                usage = None
-                if chunk.usage:
-                    usage = TokenCount(
-                        prompt_tokens=chunk.usage.prompt_tokens,
-                        completion_tokens=chunk.usage.completion_tokens,
-                        total_tokens=chunk.usage.total_tokens
-                    )
-                    final_usage = usage
+                # Accumulate content
+                if normalized_chunk.delta:
+                    accumulated_content += normalized_chunk.delta
                 
-                tool_calls = None
-                if delta.tool_calls:
-                    tool_calls = delta.tool_calls
+                # Update accumulated content in the chunk
+                normalized_chunk.content = accumulated_content
                 
-                yield StreamChunk(
-                    content=accumulated_content,
-                    delta=content_delta,
-                    finish_reason=choice.finish_reason,
-                    usage=usage,
-                    tool_calls=tool_calls
-                )
+                yield normalized_chunk
             
-        except Exception as e:
-            if "authentication" in str(e).lower():
-                raise AuthenticationError(str(e), self.provider_name, original_error=e)
-            elif "rate limit" in str(e).lower():
-                raise RateLimitError(str(e), self.provider_name, original_error=e)
-            elif "timeout" in str(e).lower():
-                raise MiiFlowTimeoutError("Streaming request timed out", self.timeout, original_error=e)
+        except groq.AuthenticationError as e:
+            raise AuthenticationError(str(e), self.provider_name, original_error=e)
+        except groq.RateLimitError as e:
+            retry_after = getattr(e.response.headers, 'retry-after', None)
+            raise RateLimitError(str(e), self.provider_name, retry_after=retry_after, original_error=e)
+        except groq.BadRequestError as e:
+            raise ModelError(str(e), self.model, original_error=e)
+        except groq.APIConnectionError as e:
+            raise ProviderError(f"Groq streaming connection error: {str(e)}", self.provider_name, original_error=e)
+        except asyncio.TimeoutError as e:
+            raise MiiFlowTimeoutError("Streaming request timed out", self.timeout, original_error=e)
+        except groq.APIStatusError as e:
+            # Handle other HTTP status codes
+            if e.status_code >= 500:
+                raise ProviderError(f"Groq streaming server error ({e.status_code}): {str(e)}", self.provider_name, original_error=e)
             else:
-                raise ProviderError(f"Groq streaming error: {str(e)}", self.provider_name, original_error=e)
+                raise ModelError(f"Groq streaming API error ({e.status_code}): {str(e)}", self.model, original_error=e)
+        except Exception as e:
+            raise ProviderError(f"Groq streaming error: {str(e)}", self.provider_name, original_error=e)

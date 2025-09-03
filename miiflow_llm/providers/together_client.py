@@ -13,6 +13,7 @@ from ..core.client import ModelClient
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount
 from ..core.exceptions import ProviderError, AuthenticationError, ModelError
+from .stream_normalizer import get_stream_normalizer
 
 
 class TogetherClient(ModelClient):
@@ -44,6 +45,7 @@ class TogetherClient(ModelClient):
         )
         
         self.provider_name = "together"
+        self.stream_normalizer = get_stream_normalizer("together")
     
     def _convert_messages_to_openai_format(self, messages: List[Message]) -> List[Dict[str, Any]]:
         """Convert messages to OpenAI format."""
@@ -144,26 +146,17 @@ class TogetherClient(ModelClient):
             accumulated_content = ""
             
             async for chunk in response_stream:
-                if chunk.choices and chunk.choices[0].delta:
-                    delta_content = chunk.choices[0].delta.content or ""
-                    accumulated_content += delta_content
-                    
-                    usage = None
-                    if chunk.usage:
-                        usage = TokenCount(
-                            prompt_tokens=chunk.usage.prompt_tokens,
-                            completion_tokens=chunk.usage.completion_tokens,
-                            total_tokens=chunk.usage.total_tokens
-                        )
-                    
-                    from ..core.client import StreamChunk
-                    yield StreamChunk(
-                        content=accumulated_content,
-                        delta=delta_content,
-                        finish_reason=chunk.choices[0].finish_reason,
-                        usage=usage,
-                        tool_calls=chunk.choices[0].delta.tool_calls if hasattr(chunk.choices[0].delta, 'tool_calls') else None
-                    )
+                # Use stream normalizer to convert Together format to unified format
+                normalized_chunk = self.stream_normalizer.normalize(chunk)
+                
+                # Accumulate content
+                if normalized_chunk.delta:
+                    accumulated_content += normalized_chunk.delta
+                
+                # Update accumulated content in the chunk
+                normalized_chunk.content = accumulated_content
+                
+                yield normalized_chunk
             
         except Exception as e:
             raise ProviderError(f"TogetherAI streaming error: {e}", provider="together")

@@ -51,13 +51,13 @@ async def test_unified_streaming():
             final_content = None
             
             from miiflow_llm.core import Message
-            messages = [Message.user('Say "Hello from [provider]" but replace [provider] with your actual provider name')]
+            messages = [Message.user('What is AWS? Please provide a brief explanation.')]
             
             async for chunk in client.stream_chat(messages):
                 chunks_received += 1
                 
-                if chunks_received <= 2:
-                    print(f'    StreamChunk #{chunks_received}: delta="{chunk.delta}" content="{chunk.content[:8]}..."')
+                if chunks_received <= 5:
+                    print(f'    StreamChunk #{chunks_received}: delta="{chunk.delta}" content="{chunk.content[:50]}..."')
                 
                 if chunk.finish_reason:
                     final_content = chunk.content

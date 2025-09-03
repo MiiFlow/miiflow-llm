@@ -3,22 +3,13 @@
 import json
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-try:
-    from mistralai.async_client import MistralAsyncClient
-    from mistralai.models.chat_completion import ChatMessage, ChatCompletionResponse
-    MISTRAL_AVAILABLE = True
-except ImportError:
-    MISTRAL_AVAILABLE = False
-    # Define placeholder classes for type hints when import fails
-    class ChatMessage:
-        pass
-    class ChatCompletionResponse:
-        pass
+from mistralai import Mistral
 
 from ..core.client import ModelClient
 from ..core.message import Message, MessageRole, TextBlock, ImageBlock
 from ..core.metrics import TokenCount
 from ..core.exceptions import ProviderError, AuthenticationError, ModelError
+from .stream_normalizer import get_stream_normalizer
 
 
 class MistralClient(ModelClient):
@@ -32,10 +23,6 @@ class MistralClient(ModelClient):
         max_retries: int = 3,
         **kwargs
     ):
-        if not MISTRAL_AVAILABLE:
-            raise ImportError(
-                "mistralai is required for Mistral. Install with: pip install mistralai"
-            )
         
         super().__init__(model, api_key, timeout, max_retries, **kwargs)
         
@@ -43,11 +30,12 @@ class MistralClient(ModelClient):
             raise AuthenticationError("Mistral API key is required", provider="mistral")
         
         # Initialize Mistral client
-        self.client = MistralAsyncClient(api_key=api_key)
+        self.client = Mistral(api_key=api_key)
         
         self.provider_name = "mistral"
+        self.stream_normalizer = get_stream_normalizer("mistral")
     
-    def _convert_messages_to_mistral_format(self, messages: List[Message]) -> List[ChatMessage]:
+    def _convert_messages_to_mistral_format(self, messages: List[Message]) -> List[Dict[str, Any]]:
         """Convert messages to Mistral format."""
         mistral_messages = []
         
@@ -77,13 +65,17 @@ class MistralClient(ModelClient):
             else:
                 content = str(message.content)
             
-            mistral_message = ChatMessage(
-                role=role,
-                content=content,
-                name=message.name,
-                tool_calls=message.tool_calls,
-                tool_call_id=message.tool_call_id
-            )
+            mistral_message = {
+                "role": role,
+                "content": content,
+            }
+            
+            if message.name:
+                mistral_message["name"] = message.name
+            if message.tool_calls:
+                mistral_message["tool_calls"] = message.tool_calls
+            if message.tool_call_id:
+                mistral_message["tool_call_id"] = message.tool_call_id
             
             mistral_messages.append(mistral_message)
         
@@ -117,7 +109,7 @@ class MistralClient(ModelClient):
                 request_params["tool_choice"] = "auto"
             
             # Make API call
-            response = await self.client.chat(**request_params)
+            response = await self.client.chat.complete_async(**request_params)
             
             # Extract response content
             content = response.choices[0].message.content or ""
@@ -179,31 +171,22 @@ class MistralClient(ModelClient):
                 request_params["tool_choice"] = "auto"
             
             # Stream response
-            response_stream = await self.client.chat_stream(**request_params)
+            response_stream = await self.client.chat.stream_async(**request_params)
             
             accumulated_content = ""
             
             async for chunk in response_stream:
-                if chunk.choices and chunk.choices[0].delta:
-                    delta_content = chunk.choices[0].delta.content or ""
-                    accumulated_content += delta_content
-                    
-                    usage = None
-                    if hasattr(chunk, 'usage') and chunk.usage:
-                        usage = TokenCount(
-                            prompt_tokens=chunk.usage.prompt_tokens,
-                            completion_tokens=chunk.usage.completion_tokens,
-                            total_tokens=chunk.usage.total_tokens
-                        )
-                    
-                    from ..core.client import StreamChunk
-                    yield StreamChunk(
-                        content=accumulated_content,
-                        delta=delta_content,
-                        finish_reason=chunk.choices[0].finish_reason,
-                        usage=usage,
-                        tool_calls=chunk.choices[0].delta.tool_calls if hasattr(chunk.choices[0].delta, 'tool_calls') else None
-                    )
+                # Use stream normalizer to convert Mistral format to unified format
+                normalized_chunk = self.stream_normalizer.normalize(chunk)
+                
+                # Accumulate content
+                if normalized_chunk.delta:
+                    accumulated_content += normalized_chunk.delta
+                
+                # Update accumulated content in the chunk
+                normalized_chunk.content = accumulated_content
+                
+                yield normalized_chunk
             
         except Exception as e:
             raise ProviderError(f"Mistral streaming error: {e}", provider="mistral")

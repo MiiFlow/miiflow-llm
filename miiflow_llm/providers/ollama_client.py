@@ -13,6 +13,7 @@ from ..core.client import ModelClient
 from ..core.message import Message, MessageRole, TextBlock, ImageBlock
 from ..core.metrics import TokenCount
 from ..core.exceptions import ProviderError, AuthenticationError, ModelError
+from .stream_normalizer import get_stream_normalizer
 
 
 class OllamaClient(ModelClient):
@@ -36,6 +37,7 @@ class OllamaClient(ModelClient):
         
         self.base_url = base_url.rstrip('/')
         self.provider_name = "ollama"
+        self.stream_normalizer = get_stream_normalizer("ollama")
         
         self.api_key = api_key
     
@@ -207,23 +209,20 @@ class OllamaClient(ModelClient):
                             try:
                                 chunk_data = json.loads(line.decode('utf-8'))
                                 
-                                if "message" in chunk_data:
-                                    delta_content = chunk_data["message"].get("content", "")
-                                    accumulated_content += delta_content
-                                    
-                                    # Check if done
-                                    is_done = chunk_data.get("done", False)
-                                    
-                                    from ..core.client import StreamChunk
-                                    yield StreamChunk(
-                                        content=accumulated_content,
-                                        delta=delta_content,
-                                        finish_reason="stop" if is_done else None,
-                                        usage=None  # Ollama doesn't provide streaming usage
-                                    )
-                                    
-                                    if is_done:
-                                        break
+                                # Use stream normalizer to convert Ollama format to unified format
+                                normalized_chunk = self.stream_normalizer.normalize(chunk_data)
+                                
+                                # Accumulate content
+                                if normalized_chunk.delta:
+                                    accumulated_content += normalized_chunk.delta
+                                
+                                # Update accumulated content in the chunk
+                                normalized_chunk.content = accumulated_content
+                                
+                                yield normalized_chunk
+                                
+                                if normalized_chunk.finish_reason:
+                                    break
                                         
                             except json.JSONDecodeError:
                                 continue  # Skip malformed lines

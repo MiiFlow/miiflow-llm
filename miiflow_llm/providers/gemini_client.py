@@ -15,6 +15,7 @@ from ..core.client import ModelClient
 from ..core.message import Message, MessageRole, TextBlock, ImageBlock
 from ..core.metrics import TokenCount
 from ..core.exceptions import ProviderError, AuthenticationError, ModelError
+from .stream_normalizer import get_stream_normalizer
 
 
 class GeminiClient(ModelClient):
@@ -46,6 +47,8 @@ class GeminiClient(ModelClient):
             self.client = genai.GenerativeModel(model_name=model)
         except Exception as e:
             raise ModelError(f"Failed to initialize Gemini model {model}: {e}")
+        
+        self.stream_normalizer = get_stream_normalizer("gemini")
         
         self.safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -202,26 +205,20 @@ class GeminiClient(ModelClient):
                 stream=True
             )
             
-            total_tokens = TokenCount()
+            accumulated_content = ""
             
             for chunk in response_stream:
-                if chunk.candidates and chunk.candidates[0].content.parts:
-                    content = chunk.candidates[0].content.parts[0].text
-                    
-                    if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
-                        total_tokens = TokenCount(
-                            prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0),
-                            completion_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0),
-                            total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0)
-                        )
-                    
-                    from ..core.client import StreamChunk
-                    yield StreamChunk(
-                        content=content,
-                        delta=content,
-                        finish_reason=chunk.candidates[0].finish_reason.name if chunk.candidates[0].finish_reason else None,
-                        usage=total_tokens if chunk.candidates[0].finish_reason else None
-                    )
+                # Use stream normalizer to convert Gemini format to unified format
+                normalized_chunk = self.stream_normalizer.normalize(chunk)
+                
+                # Accumulate content
+                if normalized_chunk.delta:
+                    accumulated_content += normalized_chunk.delta
+                
+                # Update accumulated content in the chunk
+                normalized_chunk.content = accumulated_content
+                
+                yield normalized_chunk
             
         except Exception as e:
             raise ProviderError(f"Gemini streaming error: {e}", provider="gemini")
