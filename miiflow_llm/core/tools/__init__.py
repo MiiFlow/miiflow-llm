@@ -53,7 +53,6 @@ from .decorators import (
 # Schema utilities
 from .schema_utils import (
     get_fun_schema,
-    convert_to_provider_format,
     detect_function_type
 )
 
@@ -112,7 +111,6 @@ __all__ = [
     
     # Schema utilities
     "get_fun_schema",
-    "convert_to_provider_format",
     "get_type_string",
     "extract_parameter_info",
     

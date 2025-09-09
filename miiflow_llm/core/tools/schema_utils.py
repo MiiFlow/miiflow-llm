@@ -79,29 +79,6 @@ def get_fun_schema(fn: Callable) -> Dict[str, Any]:
     return schema
 
 
-def convert_to_provider_format(schema: Dict[str, Any], provider: str) -> Dict[str, Any]:
-    """Convert universal schema to provider format."""
-    provider = provider.lower()
-    
-    if provider in ["openai", "groq", "together", "xai", "mistral", "ollama"]:
-        return {
-            "type": "function",
-            "function": schema
-        }
-    elif provider == "anthropic":
-        return {
-            "name": schema["name"],
-            "description": schema["description"],
-            "input_schema": schema["parameters"]
-        }
-    elif provider in ["gemini", "google"]:
-        return {
-            "name": schema["name"],
-            "description": schema["description"],
-            "parameters": schema["parameters"]
-        }
-    else:
-        return schema
 
 
 def _parse_docstring_params(docstring: str) -> Dict[str, str]:

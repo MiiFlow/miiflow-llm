@@ -83,15 +83,23 @@ class ToolRegistry:
         """List all registered tool names (function and HTTP)."""
         return list(self.tools.keys()) + list(self.http_tools.keys())
     
-    def get_schemas(self, provider: str) -> List[Dict[str, Any]]:
+    def get_schemas(self, provider: str, client=None) -> List[Dict[str, Any]]:
         """Get all tool schemas in provider format."""
         schemas = []
         
         for tool in self.tools.values():
-            schemas.append(tool.to_provider_format(provider))
+            if client and hasattr(client, 'convert_schema_to_provider_format'):
+                universal_schema = tool.definition.to_universal_schema()
+                schemas.append(client.convert_schema_to_provider_format(universal_schema))
+            else:
+                schemas.append(tool.to_provider_format(provider))
         
         for http_tool in self.http_tools.values():
-            schemas.append(http_tool.schema.to_provider_format(provider))
+            if client and hasattr(client, 'convert_schema_to_provider_format'):
+                universal_schema = http_tool.schema.to_universal_schema()
+                schemas.append(client.convert_schema_to_provider_format(universal_schema))
+            else:
+                schemas.append(http_tool.schema.to_provider_format(provider))
             
         return schemas
     
