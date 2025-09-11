@@ -10,17 +10,25 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), 'examples', 'tools'))
 from calculator import calculate
 from posts_api import get_user_posts, get_all_users
+from miiflow_llm.core.tools.decorators import get_tool_from_function
 
 async def test_with_working_config():
     """Test both function and API tools using decorated functions."""
     print("Testing Function Tools with Working Agent Config")
     print("=" * 50)
 
+    # Extract FunctionTool instances from decorated functions
+    function_tools = []
+    for func in [calculate, get_user_posts, get_all_users]:
+        tool = get_tool_from_function(func)
+        if tool:
+            function_tools.append(tool)
+    
     agent = create_agent(AgentConfig(
         provider='openai',
         model='gpt-4o-mini',
         context_type=ContextType.USER,
-        tools=[calculate, get_user_posts, get_all_users],
+        tools=function_tools,
         max_iterations=20,
         system_prompt="""You are a professional assistant with access to calculation and data retrieval tools.
 

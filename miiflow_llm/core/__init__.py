@@ -40,10 +40,11 @@ from .agent import (
     RunResult,
     AgentType,
     
-    # Protocols for applications to implement
+    # Protocols for applications to implement  
     DatabaseService,
     VectorStoreService,
-    KnowledgeService,
+    ContextService,
+    SearchService,
     
     # Example for documentation
     ExampleDeps,
@@ -98,7 +99,8 @@ __all__ = [
     # Protocols for applications to implement
     "DatabaseService",
     "VectorStoreService", 
-    "KnowledgeService",
+    "ContextService",
+    "SearchService",
     
     # Example for documentation
     "ExampleDeps",
