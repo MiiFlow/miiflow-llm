@@ -1,13 +1,13 @@
-"""Agent context system for miiflow-web integration."""
+"""Minimal context system for agent execution."""
 
 from enum import Enum
 from typing import Dict, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class ContextType(Enum):
-    """Types of context that miiflow-web agents can use."""
-    USER = "user"              # User-specific context
+    """Types of context for agent execution."""
+    USER = "user"              # User conversation context
     EMAIL = "email"            # Email conversation context  
     DOCUMENT = "document"      # Document analysis context
     WORKFLOW = "workflow"      # Workflow execution context
@@ -22,11 +22,7 @@ class AgentContext:
     user_id: Optional[str] = None
     thread_id: Optional[str] = None
     session_id: Optional[str] = None
-    metadata: Dict[str, Any] = None
-    
-    def __post_init__(self):
-        if self.metadata is None:
-            self.metadata = {}
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def get(self, key: str, default=None):
         """Get metadata value."""
