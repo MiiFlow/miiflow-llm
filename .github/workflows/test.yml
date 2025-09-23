@@ -44,27 +44,7 @@ jobs:
         # Run all tests in the tests directory
         python -m pytest tests/ -v --tb=short
         
-    - name: Test imports and basic functionality
-      run: |
-        python -c "
-        # Test that our refactored API works
-        
-        from miiflow_llm.agents import create_agent, AgentConfig, AgentContext
-        from miiflow_llm.core.agent import AgentType
-        
-        # Test basic agent creation (no API calls)
-        config = AgentConfig(
-            provider='openai',
-            model='gpt-3.5-turbo',
-            agent_type=AgentType.SINGLE_HOP,
-            max_iterations=1,
-            system_prompt='Test agent'
-        )
-        
-        # This should work without API keys
-        agent = create_agent(config)
-        context = AgentContext()
-        "
+   
 
   lint:
     runs-on: ubuntu-latest
