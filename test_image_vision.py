@@ -82,7 +82,7 @@ async def test_image_vision_workflow(image_path: str):
             print(f"Vision agent initialized: {provider.upper()} ({model})")
             
             # Create message with image using our multimedia framework
-            message = Message.user_with_image(
+            message = Message.from_image(
                 text=vision_query,
                 image_url=image_data_uri,
                 detail="high"
@@ -141,7 +141,7 @@ async def test_multimodal_combination(image_path: str):
                 
             image_data_uri = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
         
-        message = Message.user_with_image(
+        message = Message.from_image(
             text="Analyze this image and tell me what you see. Be detailed and descriptive.",
             image_url=image_data_uri,
             detail="high"

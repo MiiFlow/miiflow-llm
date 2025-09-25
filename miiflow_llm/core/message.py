@@ -1,8 +1,11 @@
 """Message handling and format conversion for different providers."""
 
+import mimetypes
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
 
@@ -50,6 +53,27 @@ class DocumentBlock:
     document_type: str = "pdf"
     filename: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    @classmethod
+    def from_url(cls, document_url: str, filename: Optional[str] = None, **kwargs) -> "DocumentBlock":
+        """Create DocumentBlock with auto-detected document type from URL."""
+        document_type = cls._detect_type_from_url(document_url)
+        return cls(
+            document_url=document_url,
+            document_type=document_type,
+            filename=filename,
+            **kwargs
+        )
+    
+    @staticmethod
+    def _detect_type_from_url(url: str) -> str:
+        """Detect document type from URL."""
+        if url.startswith('data:'):
+            return 'pdf' if 'application/pdf' in url else 'pdf'
+        
+        extension = Path(urllib.parse.urlparse(url).path).suffix.lower()
+        types = {'.pdf': 'pdf', '.doc': 'doc', '.docx': 'docx', '.txt': 'txt', '.csv': 'csv'}
+        return types.get(extension, 'pdf')
 
 
 # Union type for content blocks
@@ -94,7 +118,7 @@ class Message:
         )
     
     @classmethod
-    def user_with_pdf(cls, text: str, pdf_url: str, filename: Optional[str] = None, **kwargs) -> "Message":
+    def from_pdf(cls, text: str, pdf_url: str, filename: Optional[str] = None, **kwargs) -> "Message":
         """Create a user message with PDF attachment."""
         content = [
             TextBlock(text=text),
@@ -107,7 +131,7 @@ class Message:
         return cls(role=MessageRole.USER, content=content, **kwargs)
     
     @classmethod
-    def user_with_image(cls, text: str, image_url: str, detail: Optional[Literal["auto", "low", "high"]] = "auto", **kwargs) -> "Message":
+    def from_image(cls, text: str, image_url: str, detail: Optional[Literal["auto", "low", "high"]] = "auto", **kwargs) -> "Message":
         """Create a user message with image attachment."""
         content = [
             TextBlock(text=text),
@@ -119,7 +143,7 @@ class Message:
         return cls(role=MessageRole.USER, content=content, **kwargs)
     
     @classmethod
-    def user_with_attachments(cls, text: str, attachments: List[Union[str, Dict[str, Any]]], **kwargs) -> "Message":
+    def from_attatchments(cls, text: str, attachments: List[Union[str, Dict[str, Any]]], **kwargs) -> "Message":
         """Create a user message with multiple attachments."""
         content = [TextBlock(text=text)]
         
@@ -129,9 +153,8 @@ class Message:
             elif isinstance(attachment, dict):
                 attachment_type = attachment.get("type", "image")
                 if attachment_type == "pdf":
-                    content.append(DocumentBlock(
+                    content.append(DocumentBlock.from_url(
                         document_url=attachment["url"],
-                        document_type="pdf",
                         filename=attachment.get("filename")
                     ))
                 elif attachment_type == "image":
