@@ -25,7 +25,7 @@ classifiers = [
 [tool.poetry.dependencies]
 python = "^3.9"
 openai = "^1.50.0"
-anthropic = "^0.40.0"
+anthropic = "^0.41.0"
 pydantic = "^2.0.0"
 tiktoken = "^0.8.0"
 tenacity = "^9.0.0"
@@ -53,7 +53,6 @@ arize-phoenix = { version = "^4.29.0", optional = true }
 # OpenInference auto-instrumentation
 openinference-instrumentation-openai = { version = "^0.1.12", optional = true }
 openinference-instrumentation-anthropic = { version = "^0.1.5", optional = true }
-phoenix-evals = { version = "^0.9.0", optional = true }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
@@ -72,8 +71,8 @@ together = ["together"]
 mistral = ["mistralai"]
 pdf = ["PyMuPDF"]
 multimedia = ["PyMuPDF"]
-observability = ["opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic", "phoenix-evals"]
-all = ["groq", "google-generativeai", "together", "mistralai", "PyMuPDF", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic", "phoenix-evals"]
+observability = ["opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic"]
+all = ["groq", "google-generativeai", "together", "mistralai", "PyMuPDF", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic"]
 
 [build-system]
 requires = ["poetry-core"]
