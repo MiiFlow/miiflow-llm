@@ -265,10 +265,13 @@ class Agent(Generic[Deps, Result]):
                     break
 
             final_answer = None
+            all_events = []
             async for event in self.stream_single_hop(user_prompt, context=context):
+                all_events.append(event)
                 if isinstance(event, dict) and event.get("event") == "execution_complete":
                     final_answer = event.get("data", {}).get("result", "")
-                    break
+            
+            logger.debug(f"Consumed {len(all_events)} events from stream_single_hop")
 
             if self.result_type == str:
                 return final_answer or "No final answer received"
@@ -436,7 +439,7 @@ class Agent(Generic[Deps, Result]):
             final_tool_calls = None
             has_tool_calls = False
 
-            # Stream LLM response
+            # Stream LLM response - consume ALL chunks to ensure metrics are recorded
             async for chunk in self.client.astream_chat(
                 messages=context.messages,
                 tools=self._tools if self._tools else None,
@@ -453,8 +456,7 @@ class Agent(Generic[Deps, Result]):
                 if chunk.tool_calls:
                     has_tool_calls = True
 
-                if chunk.finish_reason:
-                    break
+                # Don't break - let the async generator finish to record metrics
 
             # If we had tool calls, get them properly by making a non-streaming call
             if has_tool_calls:
@@ -471,6 +473,16 @@ class Agent(Generic[Deps, Result]):
                 tool_calls=final_tool_calls
             )
             context.messages.append(response_message)
+            
+            # If no tool calls and streaming didn't capture usage, make a final call
+            # This ensures metrics are recorded (streaming often doesn't include usage)
+            if not has_tool_calls:
+                # Make a non-streaming call to record metrics properly
+                await self.client.achat(
+                    messages=context.messages[:-1],  # Exclude the message we just added
+                    tools=self._tools if self._tools else None,
+                    temperature=self.temperature
+                )
             
             # Handle tool calls if present
             if final_tool_calls:
