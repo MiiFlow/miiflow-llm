@@ -109,10 +109,10 @@ class FunctionTool:
     async def acall(self, **kwargs) -> ToolResult:
         """Async execute the function with safe error handling."""
         start_time = time.time()
-        
+
         try:
             validated_inputs = self.validate_inputs(**kwargs)
-            
+
             if self.function_type == FunctionType.ASYNC:
                 result = await self.fn(**validated_inputs)
             elif self.function_type == FunctionType.SYNC:
@@ -130,9 +130,9 @@ class FunctionTool:
                 result = await asyncio.get_event_loop().run_in_executor(None, run_sync_gen)
             else:
                 raise ToolExecutionError(f"Unsupported function type: {self.function_type}")
-            
+
             execution_time = time.time() - start_time
-            
+
             return ToolResult(
                 name=self.name,
                 input=validated_inputs,
@@ -141,13 +141,30 @@ class FunctionTool:
                 execution_time=execution_time,
                 metadata={"function_type": self.function_type.value}
             )
-            
-        except Exception as e:
+
+        except ToolExecutionError as e:
+            # Parameter validation or execution errors - provide detailed feedback
             execution_time = time.time() - start_time
-            error_msg = f"Tool '{self.name}' failed: {str(e)}"
+            error_type = type(e).__name__
+            error_details = str(e)
+
+            # Build detailed error message with parameter information
+            error_msg = f"Tool '{self.name}' execution failed ({error_type}): {error_details}"
+
+            # Add parameter schema information if validation failed
+            if "required parameter" in error_details.lower() or "missing" in error_details.lower():
+                required_params = [name for name, schema in self.definition.parameters.items() if schema.required]
+                optional_params = [name for name, schema in self.definition.parameters.items() if not schema.required]
+                error_msg += f"\n\nExpected parameters:"
+                if required_params:
+                    error_msg += f"\n  Required: {', '.join(required_params)}"
+                if optional_params:
+                    error_msg += f"\n  Optional: {', '.join(optional_params)}"
+                error_msg += f"\n  Provided: {', '.join(kwargs.keys())}"
+
             logger.debug(error_msg, exc_info=True)
             logger.error(error_msg)
-            
+
             return ToolResult(
                 name=self.name,
                 input=kwargs,
@@ -155,7 +172,100 @@ class FunctionTool:
                 error=error_msg,
                 success=False,
                 execution_time=execution_time,
-                metadata={"function_type": self.function_type.value, "error_type": type(e).__name__}
+                metadata={"function_type": self.function_type.value, "error_type": error_type}
+            )
+
+        except TypeError as e:
+            # Type errors often indicate parameter mismatches
+            execution_time = time.time() - start_time
+            error_details = str(e)
+
+            # Build helpful error message with type information
+            error_msg = f"Tool '{self.name}' parameter type error: {error_details}"
+            error_msg += "\n\nParameter types expected:"
+            for param_name, param_schema in self.definition.parameters.items():
+                param_type = param_schema.type.value if hasattr(param_schema.type, 'value') else str(param_schema.type)
+                required_str = " (required)" if param_schema.required else " (optional)"
+                default_str = f", default={param_schema.default}" if param_schema.default is not None else ""
+                error_msg += f"\n  - {param_name}: {param_type}{required_str}{default_str}"
+
+            if kwargs:
+                error_msg += "\n\nParameters provided:"
+                for param_name, value in kwargs.items():
+                    value_type = type(value).__name__
+                    error_msg += f"\n  - {param_name}: {value_type} = {repr(value)[:100]}"
+
+            logger.debug(error_msg, exc_info=True)
+            logger.error(error_msg)
+
+            return ToolResult(
+                name=self.name,
+                input=kwargs,
+                output=None,
+                error=error_msg,
+                success=False,
+                execution_time=execution_time,
+                metadata={"function_type": self.function_type.value, "error_type": "TypeError"}
+            )
+
+        except ValueError as e:
+            # Value errors often indicate invalid parameter values
+            execution_time = time.time() - start_time
+            error_details = str(e)
+
+            error_msg = f"Tool '{self.name}' parameter value error: {error_details}"
+            error_msg += "\n\nPlease check that all parameter values are valid and within expected ranges."
+
+            # Add enum information if available
+            for param_name, param_schema in self.definition.parameters.items():
+                if param_schema.enum and param_name in kwargs:
+                    error_msg += f"\n  - {param_name} must be one of: {', '.join(map(str, param_schema.enum))}"
+                if hasattr(param_schema, 'minimum') and param_schema.minimum is not None and param_name in kwargs:
+                    error_msg += f"\n  - {param_name} minimum: {param_schema.minimum}"
+                if hasattr(param_schema, 'maximum') and param_schema.maximum is not None and param_name in kwargs:
+                    error_msg += f"\n  - {param_name} maximum: {param_schema.maximum}"
+
+            logger.debug(error_msg, exc_info=True)
+            logger.error(error_msg)
+
+            return ToolResult(
+                name=self.name,
+                input=kwargs,
+                output=None,
+                error=error_msg,
+                success=False,
+                execution_time=execution_time,
+                metadata={"function_type": self.function_type.value, "error_type": "ValueError"}
+            )
+
+        except Exception as e:
+            # Generic exception handling with detailed information
+            execution_time = time.time() - start_time
+            error_type = type(e).__name__
+            error_details = str(e)
+
+            # Build comprehensive error message
+            error_msg = f"Tool '{self.name}' failed with {error_type}: {error_details}"
+
+            # Include module and class info if available
+            if hasattr(e, '__module__'):
+                error_msg += f"\n  Exception module: {e.__module__}"
+
+            # Add context about what was attempted
+            if kwargs:
+                error_msg += f"\n  Called with {len(kwargs)} parameter(s): {', '.join(kwargs.keys())}"
+
+            logger.debug(error_msg, exc_info=True)
+            logger.error(error_msg)
+
+            return ToolResult(
+                name=self.name,
+                input=kwargs,
+                output=None,
+                error=error_msg,
+                success=False,
+                execution_time=execution_time,
+                metadata={"function_type": self.function_type.value, "error_type": error_type}
             )
     
     def _filter_context_parameters(self):
