@@ -466,11 +466,12 @@ class ReActOrchestrator:
                     f"This violates the ReAct pattern. The agent may be stuck."
                 )
             elif not has_content and not has_valid_step and not buffer.strip():
-                # Completely empty response
+                # Completely empty response - treat as error
                 logger.warning(
                     f"Step {state.current_step}: LLM returned completely empty response. "
                     f"No thinking, action, or answer detected."
                 )
+                step.error = "LLM returned completely empty response"
 
             # CRITICAL FIX: Always preserve the assistant's response in conversation history
             # This ensures proper action-observation pairing for the LLM
@@ -505,6 +506,18 @@ class ReActOrchestrator:
                 logger.debug(f"Added assistant message to context: {assistant_content[:100]}...")
             else:
                 logger.warning(f"Step {state.current_step}: No assistant content to add to context")
+                # Add recovery prompt to break the empty response pattern
+                recovery_prompt = (
+                    "Your previous response was empty. Please provide a valid response using either:\n"
+                    "1. <tool_call> to execute an action, OR\n"
+                    "2. <answer> to provide your final answer.\n"
+                    "Remember: NEVER output only <thinking> or leave the response empty."
+                )
+                recovery_message = Message(role=MessageRole.USER, content=recovery_prompt)
+                context.messages.append(recovery_message)
+                logger.debug(
+                    f"Step {state.current_step} - Added recovery prompt to help LLM recover from empty response"
+                )
 
             # Handle tool action if detected (AFTER adding assistant message)
             if step.action and not answer_detected:

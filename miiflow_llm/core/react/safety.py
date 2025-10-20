@@ -225,6 +225,33 @@ class ThinkingOnlyCondition(StopCondition):
         return f"Agent stuck in thinking-only mode for {self.max_thinking_only_steps} consecutive steps"
 
 
+@dataclass
+class EmptyResponseCondition(StopCondition):
+    """Stop when LLM repeatedly returns completely empty responses."""
+
+    max_empty_responses: int = 2
+
+    def should_stop(self, steps: List[ReActStep], current_step: int) -> bool:
+        if len(steps) < self.max_empty_responses:
+            return False
+
+        # Check last N steps - if they all have NO thought, NO action, and NO answer, LLM is stuck
+        recent_steps = steps[-self.max_empty_responses :]
+        empty_steps = [
+            step
+            for step in recent_steps
+            if not step.thought and not step.action and not step.answer
+        ]
+
+        return len(empty_steps) >= self.max_empty_responses
+
+    def get_stop_reason(self) -> StopReason:
+        return StopReason.FORCED_STOP
+
+    def get_description(self) -> str:
+        return f"LLM returned {self.max_empty_responses} consecutive empty responses"
+
+
 class SafetyManager:
     """Manages all safety conditions for ReAct loop."""
 
@@ -236,6 +263,7 @@ class SafetyManager:
         max_repeated_actions: int = 3,
         max_consecutive_errors: int = 3,
         max_thinking_only_steps: int = 3,
+        max_empty_responses: int = 2,
         enable_loop_detection: bool = True,
     ):
         self.conditions: List[StopCondition] = []
@@ -258,6 +286,9 @@ class SafetyManager:
 
         if max_thinking_only_steps > 0:
             self.conditions.append(ThinkingOnlyCondition(max_thinking_only_steps))
+
+        if max_empty_responses > 0:
+            self.conditions.append(EmptyResponseCondition(max_empty_responses))
 
         if enable_loop_detection:
             self.conditions.append(InfiniteLoopDetector())
