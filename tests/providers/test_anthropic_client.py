@@ -193,7 +193,7 @@ class TestAnthropicClient:
     async def test_tool_calls_not_supported(self, client, sample_messages):
         """Test that tool calls raise appropriate error."""
         tools = [{"type": "function", "function": {"name": "test"}}]
-        
+
         # Anthropic might not support tools in same way as OpenAI
         # This test ensures graceful handling
         mock_response = MagicMock()
@@ -203,10 +203,124 @@ class TestAnthropicClient:
         mock_response.stop_reason = "end_turn"
         mock_response.usage.prompt_tokens = 5
         mock_response.usage.completion_tokens = 10
-        
+
         with patch.object(client.client.messages, 'create', new_callable=AsyncMock) as mock_create:
             mock_create.return_value = mock_response
-            
+
             # Should not crash, even if tools are passed
             response = await client.achat(sample_messages, tools=tools)
             assert response.message.content == "I can't use tools."
+
+    @pytest.mark.asyncio
+    async def test_empty_content_handling(self, client):
+        """Test that empty or whitespace-only content is handled correctly."""
+        # Test with empty string
+        empty_message = Message.user("")
+        system, converted = client._prepare_messages([empty_message])
+
+        assert len(converted) == 1
+        assert converted[0]["role"] == "user"
+        # Should have placeholder content, not empty or whitespace
+        assert converted[0]["content"][0]["type"] == "text"
+        assert converted[0]["content"][0]["text"] == "[no content]"
+        assert converted[0]["content"][0]["text"].strip() != ""
+
+        # Test with whitespace-only string
+        whitespace_message = Message.user("   \n\t  ")
+        system, converted = client._prepare_messages([whitespace_message])
+
+        assert len(converted) == 1
+        assert converted[0]["role"] == "user"
+        # Should have placeholder content, not whitespace
+        assert converted[0]["content"][0]["type"] == "text"
+        assert converted[0]["content"][0]["text"] == "[no content]"
+        assert converted[0]["content"][0]["text"].strip() != ""
+
+    @pytest.mark.asyncio
+    async def test_whitespace_textblock_filtering(self, client):
+        """Test that whitespace-only TextBlock objects are filtered out."""
+        from miiflow_llm.core.message import TextBlock, ImageBlock
+
+        # Create a message with both valid and whitespace-only text blocks
+        multimodal_message = Message.user([
+            TextBlock(text="   "),  # Whitespace-only, should be filtered
+            TextBlock(text="Valid content"),  # Should be kept
+            TextBlock(text=""),  # Empty, should be filtered
+        ])
+
+        system, converted = client._prepare_messages([multimodal_message])
+
+        assert len(converted) == 1
+        assert converted[0]["role"] == "user"
+        assert isinstance(converted[0]["content"], list)
+        # Should only have one text block (the valid one)
+        text_blocks = [b for b in converted[0]["content"] if b["type"] == "text"]
+        assert len(text_blocks) == 1
+        assert text_blocks[0]["text"] == "Valid content"
+
+    @pytest.mark.asyncio
+    async def test_all_whitespace_blocks_get_placeholder(self, client):
+        """Test that if all TextBlocks are whitespace, a placeholder is added."""
+        from miiflow_llm.core.message import TextBlock
+
+        # Create a message with only whitespace text blocks
+        multimodal_message = Message.user([
+            TextBlock(text="   "),  # Whitespace-only
+            TextBlock(text=""),  # Empty
+        ])
+
+        system, converted = client._prepare_messages([multimodal_message])
+
+        assert len(converted) == 1
+        assert converted[0]["role"] == "user"
+        assert isinstance(converted[0]["content"], list)
+        # Should have placeholder since all were filtered
+        assert len(converted[0]["content"]) == 1
+        assert converted[0]["content"][0]["type"] == "text"
+        assert converted[0]["content"][0]["text"] == "[no content]"
+
+    @pytest.mark.asyncio
+    async def test_tool_result_with_empty_content(self, client):
+        """Test that tool results with empty content get placeholder."""
+        # Create a tool result message with empty content
+        tool_result = Message(
+            role=MessageRole.USER,
+            content="",
+            tool_call_id="call_123"
+        )
+
+        system, converted = client._prepare_messages([tool_result])
+
+        assert len(converted) == 1
+        assert converted[0]["role"] == "user"
+        assert converted[0]["content"][0]["type"] == "tool_result"
+        assert converted[0]["content"][0]["tool_use_id"] == "call_123"
+        # Should have placeholder content
+        assert converted[0]["content"][0]["content"] == "[empty result]"
+        assert converted[0]["content"][0]["content"].strip() != ""
+
+    @pytest.mark.asyncio
+    async def test_assistant_with_tool_calls_and_whitespace_content(self, client):
+        """Test assistant message with tool calls and whitespace-only content."""
+        # Create an assistant message with tool calls and whitespace content
+        assistant_msg = Message(
+            role=MessageRole.ASSISTANT,
+            content="   ",  # Whitespace-only
+            tool_calls=[
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {"name": "test_tool", "arguments": {"arg": "value"}}
+                }
+            ]
+        )
+
+        system, converted = client._prepare_messages([assistant_msg])
+
+        assert len(converted) == 1
+        assert converted[0]["role"] == "assistant"
+        assert isinstance(converted[0]["content"], list)
+        # Should only have tool_use block, no text block since content was whitespace
+        content_types = [b["type"] for b in converted[0]["content"]]
+        assert "tool_use" in content_types
+        assert "text" not in content_types  # Whitespace text should be filtered

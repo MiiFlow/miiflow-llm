@@ -64,15 +64,19 @@ class AnthropicClient(ModelClient):
         if message.tool_call_id and message.role in (MessageRole.USER, MessageRole.TOOL):
             # This is a tool result message - Anthropic requires "user" role
             anthropic_message = {"role": "user"}
+
+            # Ensure tool result content is not empty or whitespace-only
+            tool_content = (
+                message.content if isinstance(message.content, str) else str(message.content)
+            )
+            if not tool_content or not tool_content.strip():
+                tool_content = "[empty result]"
+
             anthropic_message["content"] = [
                 {
                     "type": "tool_result",
                     "tool_use_id": message.tool_call_id,
-                    "content": (
-                        message.content
-                        if isinstance(message.content, str)
-                        else str(message.content)
-                    ),
+                    "content": tool_content,
                 }
             ]
             return anthropic_message
@@ -83,8 +87,8 @@ class AnthropicClient(ModelClient):
         if message.tool_calls and message.role == MessageRole.ASSISTANT:
             content_list = []
 
-            # Add text content if present
-            if message.content:
+            # Add text content if present and non-whitespace
+            if message.content and message.content.strip():
                 content_list.append({"type": "text", "text": message.content})
 
             # Add tool use blocks
@@ -105,21 +109,23 @@ class AnthropicClient(ModelClient):
 
         # Handle regular messages
         if isinstance(message.content, str):
-            # Anthropic requires non-empty content for all non-final messages
-            # Ensure we always have content, or convert to structured format
+            # Anthropic requires non-empty, non-whitespace content
+            # Ensure we always have content, or use a placeholder
             content = message.content.strip() if message.content else ""
 
             if not content:
-                # Empty content - wrap in structured format with minimal text
-                # This satisfies Anthropic's requirement for non-empty content
-                anthropic_message["content"] = [{"type": "text", "text": " "}]
+                # Empty content - use a minimal placeholder that's not whitespace
+                # Anthropic rejects whitespace-only content
+                anthropic_message["content"] = [{"type": "text", "text": "[no content]"}]
             else:
                 anthropic_message["content"] = content
         else:
             content_list = []
             for block in message.content:
                 if isinstance(block, TextBlock):
-                    content_list.append({"type": "text", "text": block.text})
+                    # Only add text blocks with non-whitespace content
+                    if block.text and block.text.strip():
+                        content_list.append({"type": "text", "text": block.text})
                 elif isinstance(block, ImageBlock):
                     if block.image_url.startswith("data:"):
                         base64_content, media_type = data_uri_to_base64_and_mimetype(
@@ -165,6 +171,11 @@ class AnthropicClient(ModelClient):
                                 },
                             }
                         )
+
+            # Ensure content_list is not empty (after filtering whitespace-only blocks)
+            if not content_list:
+                content_list = [{"type": "text", "text": "[no content]"}]
+
             anthropic_message["content"] = content_list
 
         return anthropic_message

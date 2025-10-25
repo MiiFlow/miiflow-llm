@@ -213,6 +213,90 @@ class TestStatelessPatterns:
         assert hasattr(context_tool, 'context_injection')
 
 
+class TestStreamSingleHop:
+    """Tests for stream_single_hop method."""
+
+    @pytest.mark.asyncio
+    async def test_stream_single_hop_adds_user_message(self):
+        """Test that stream_single_hop adds user message to context."""
+        from unittest.mock import MagicMock
+        from miiflow_llm.core.agent import Agent, RunContext
+        from miiflow_llm.core.message import Message, MessageRole
+        from miiflow_llm.core.client import StreamChunk
+
+        # Create a mock client
+        mock_client = MagicMock()
+
+        # Setup mock streaming response
+        async def mock_stream(*args, **kwargs):
+            yield StreamChunk(content="Hello", delta="Hello", finish_reason=None)
+            yield StreamChunk(content="Hello!", delta="!", finish_reason="stop")
+
+        mock_client.astream_chat = mock_stream
+
+        # Create agent
+        agent = Agent(client=mock_client, agent_type="single_hop")
+
+        # Create context with some history but NO user message yet
+        context = RunContext(
+            deps=None, messages=[Message.system("You are helpful"), Message.user("Previous question")]
+        )
+
+        user_prompt = "What is 2+2?"
+
+        # Stream single hop
+        events = []
+        async for event in agent.stream_single_hop(user_prompt, context=context):
+            events.append(event)
+
+        # Verify user message was added to context
+        assert len(context.messages) == 4  # system + previous user + new user + assistant response
+        assert context.messages[2].role == MessageRole.USER
+        assert context.messages[2].content == user_prompt
+
+    @pytest.mark.asyncio
+    async def test_stream_single_hop_doesnt_duplicate_message(self):
+        """Test that stream_single_hop doesn't duplicate if message already exists."""
+        from unittest.mock import MagicMock
+        from miiflow_llm.core.agent import Agent, RunContext
+        from miiflow_llm.core.message import Message, MessageRole
+        from miiflow_llm.core.client import StreamChunk
+
+        # Create a mock client
+        mock_client = MagicMock()
+
+        # Setup mock streaming response
+        async def mock_stream(*args, **kwargs):
+            yield StreamChunk(content="4", delta="4", finish_reason="stop")
+
+        mock_client.astream_chat = mock_stream
+
+        # Create agent
+        agent = Agent(client=mock_client, agent_type="single_hop")
+
+        user_prompt = "What is 2+2?"
+
+        # Create context with user message already present (simulating run() flow)
+        context = RunContext(
+            deps=None, messages=[Message.system("You are helpful"), Message.user(user_prompt)]
+        )
+
+        initial_message_count = len(context.messages)
+
+        # Stream single hop
+        events = []
+        async for event in agent.stream_single_hop(user_prompt, context=context):
+            events.append(event)
+
+        # Verify message count increased by only 1 (the assistant response)
+        # Should NOT add duplicate user message
+        assert len(context.messages) == initial_message_count + 1
+        # Last user message should still be the original one
+        user_messages = [m for m in context.messages if m.role == MessageRole.USER]
+        assert len(user_messages) == 1
+        assert user_messages[0].content == user_prompt
+
+
 class TestImportPatterns:
     """Test that imports work correctly."""
     

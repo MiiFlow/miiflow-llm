@@ -343,7 +343,11 @@ class Agent(Generic[Deps, Result]):
     ) -> AsyncIterator[Dict[str, Any]]:
         """Stream single-hop execution - uses context from run() (no duplication)."""
 
-        # Context is provided by run() - no setup duplication!
+        # Add user message to context if not already present
+        # This handles cases where stream_single_hop is called directly (not from run())
+        if not context.messages or context.messages[-1].content != user_prompt:
+            user_msg = Message(role=MessageRole.USER, content=user_prompt)
+            context.messages.append(user_msg)
 
         yield {
             "event": "execution_start",
