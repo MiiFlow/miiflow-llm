@@ -22,6 +22,7 @@ Result = TypeVar("Result")
 class AgentType(Enum):
     SINGLE_HOP = "single_hop"  # Simple, direct response
     REACT = "react"  # ReAct with multi-hop reasoning
+    PLAN_AND_EXECUTE = "plan_and_execute"  # Plan then execute for complex multi-step tasks
 
 
 @dataclass
@@ -175,14 +176,14 @@ class Agent(Generic[Deps, Result]):
 
     async def _execute_with_context(self, context: RunContext[Deps]) -> Result:
         """Route to appropriate execution based on agent type."""
-        if self.agent_type == AgentType.SINGLE_HOP:
-            # Extract user prompt from context messages
-            user_prompt = ""
-            for msg in reversed(context.messages):
-                if msg.role == MessageRole.USER:
-                    user_prompt = msg.content
-                    break
+        # Extract user prompt from context messages
+        user_prompt = ""
+        for msg in reversed(context.messages):
+            if msg.role == MessageRole.USER:
+                user_prompt = msg.content
+                break
 
+        if self.agent_type == AgentType.SINGLE_HOP:
             final_answer = None
             async for event in self.stream_single_hop(user_prompt, context=context):
                 if isinstance(event, dict) and event.get("event") == "execution_complete":
@@ -193,14 +194,8 @@ class Agent(Generic[Deps, Result]):
                 return final_answer or "No final answer received"
             else:
                 return final_answer or "No final answer received"
-        else:  # AgentType.REACT
-            # Extract user prompt from context messages
-            user_prompt = ""
-            for msg in reversed(context.messages):
-                if msg.role == MessageRole.USER:
-                    user_prompt = msg.content
-                    break
 
+        elif self.agent_type == AgentType.REACT:
             final_answer = None
             async for event in self.stream_react(
                 user_prompt, context, max_steps=self.max_iterations
@@ -213,6 +208,23 @@ class Agent(Generic[Deps, Result]):
                 return final_answer or "No final answer received"
             else:
                 return final_answer or "No final answer received"
+
+        elif self.agent_type == AgentType.PLAN_AND_EXECUTE:
+            final_answer = None
+            async for event in self.stream_plan_execute(
+                user_prompt, context, max_replans=self.max_iterations // 5  # Default max replans
+            ):
+                if hasattr(event, 'event_type') and event.event_type.value == "final_answer":
+                    final_answer = event.data.get("answer", "")
+                    break
+
+            if self.result_type == str:
+                return final_answer or "No final answer received"
+            else:
+                return final_answer or "No final answer received"
+
+        else:
+            raise ValueError(f"Unknown agent type: {self.agent_type}")
 
     async def _execute_tool_calls(
         self, tool_calls: List[Dict[str, Any]], context: RunContext[Deps]
@@ -337,6 +349,77 @@ class Agent(Generic[Deps, Result]):
 
         finally:
             orchestrator.event_bus.unsubscribe(real_time_stream)
+
+    async def stream_plan_execute(
+        self,
+        query: str,
+        context: RunContext,
+        max_replans: int = 2,
+    ):
+        """Run agent in Plan and Execute mode with streaming events."""
+        from .react.plan_execute_orchestrator import PlanAndExecuteOrchestrator
+        from .react import ReActFactory
+        from .react.events import EventBus
+        from .react.safety import SafetyManager
+        from .react.tool_executor import AgentToolExecutor
+
+        # Create dependencies
+        tool_executor = AgentToolExecutor(self)
+        event_bus = EventBus()
+        safety_manager = SafetyManager(max_steps=999)  # High limit for Plan & Execute
+
+        # Create ReAct orchestrator for subtask execution (composition pattern)
+        react_orchestrator = ReActFactory.create_orchestrator(
+            agent=self,
+            max_steps=10,  # Each subtask gets up to 10 ReAct steps
+            use_native_tools=self.use_native_tool_calling,
+        )
+
+        # Create Plan and Execute orchestrator
+        orchestrator = PlanAndExecuteOrchestrator(
+            tool_executor=tool_executor,
+            event_bus=event_bus,
+            safety_manager=safety_manager,
+            subtask_orchestrator=react_orchestrator,
+            max_replans=max_replans,
+            use_react_for_subtasks=True,  # Use ReAct for complex subtasks
+        )
+
+        # Real-time streaming setup
+        event_queue = asyncio.Queue()
+
+        def real_time_stream(event):
+            """Stream events immediately as they're published."""
+            try:
+                event_queue.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning("Event queue full, dropping event")
+
+        event_bus.subscribe(real_time_stream)
+        execution_task = asyncio.create_task(orchestrator.execute(query, context))
+
+        try:
+            while not execution_task.done():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    yield event
+                    event_queue.task_done()
+                except asyncio.TimeoutError:
+                    continue
+
+            # Drain remaining events
+            while not event_queue.empty():
+                try:
+                    event = event_queue.get_nowait()
+                    yield event
+                    event_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+
+            await execution_task
+
+        finally:
+            event_bus.unsubscribe(real_time_stream)
 
     async def stream_single_hop(
         self, user_prompt: str, *, context: RunContext[Deps]

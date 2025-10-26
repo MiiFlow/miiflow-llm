@@ -228,7 +228,7 @@ Guidelines:
 5. **No narration in answers**: Inside <answer> tags, do NOT say things like "Now I'll...", "Let me...", or "Finally...". Just state the answer clearly.
 6. **Work methodically**: For multi-step problems, use tools one at a time, thinking through each result
 
-Example flow:
+CORRECT Example:
 <thinking>
 I need to calculate 1 + 2 * 3 + 4. Following order of operations, I'll first multiply 2 * 3.
 </thinking>
@@ -259,7 +259,27 @@ Here's how I calculated it:
 3. Finally: 7 + 4 = 11
 </answer>
 
-IMPORTANT: The user only sees content inside <answer> tags as your final response. Everything in <thinking> tags is for your reasoning process."""
+INCORRECT Examples (DO NOT DO THIS):
+
+❌ WRONG - No XML tags at all:
+I need to check the weather in Paris. Let me use the get_weather tool...
+
+❌ WRONG - Missing <answer> tags in final response:
+The current temperature in Paris is 18°C with partly cloudy skies.
+
+❌ WRONG - Mixing thinking and answer without proper tags:
+I've checked the database and found that you have 131 accounts. This is based on the latest data.
+
+✅ CORRECT - Proper XML structure:
+<thinking>
+I've checked the database and found 131 accounts. I'll now provide this as a final answer.
+</thinking>
+
+<answer>
+You have 131 accounts in your database based on the latest data.
+</answer>
+
+IMPORTANT: The user only sees content inside <answer> tags as your final response. Everything in <thinking> tags is for your reasoning process. If you don't use XML tags, your response may not be processed correctly."""
 
 # System prompt template for XML-based ReAct reasoning (legacy)
 REACT_SYSTEM_PROMPT = """You are an AI assistant that follows the ReAct (Reasoning + Acting) pattern using XML tags.
@@ -301,7 +321,7 @@ CRITICAL RULES:
 7. When you have enough information, provide <answer> immediately
 8. NEVER include <observation> tags in your response - the system provides them automatically
 
-EXAMPLES:
+CORRECT EXAMPLES:
 
 Example 1 - First tool call:
 <thinking>
@@ -328,10 +348,38 @@ Example 3 - Direct tool call (no thinking):
 {{"location": "Paris", "units": "celsius"}}
 </tool_call>
 
+INCORRECT EXAMPLES (DO NOT DO THIS):
+
+❌ WRONG - Only <thinking> without action:
+<thinking>
+I need to check the weather in Paris using the get_weather tool.
+</thinking>
+
+❌ WRONG - No XML tags at all:
+Let me check the weather in Paris for you...
+
+❌ WRONG - Missing <answer> tags for final response:
+The weather in Paris is 18°C and cloudy.
+
+✅ CORRECT - Proper structure with action after thinking:
+<thinking>
+I need to check the weather in Paris using the get_weather tool.
+</thinking>
+
+<tool_call name="get_weather">
+{{"location": "Paris", "units": "celsius"}}
+</tool_call>
+
+✅ CORRECT - Proper final answer:
+<answer>
+The weather in Paris is 18°C and cloudy.
+</answer>
+
 IMPORTANT:
 - NEVER end your response with only <thinking> - always follow with <tool_call> or <answer>
 - If you're unsure what to do, provide your best <answer> rather than stopping at thinking
-- Your <answer> will be streamed to the user as you write it"""
+- Your <answer> will be streamed to the user as you write it
+- If you don't use proper XML tags, your response may not be processed correctly"""
 
 
 # Additional Value Objects and Supporting Classes
@@ -407,3 +455,273 @@ class SafetyViolationError(Exception):
     """Raised when a safety condition is violated."""
 
     pass
+
+
+# Plan and Execute Data Structures
+
+
+@dataclass
+class SubTask:
+    """A single subtask in a plan."""
+
+    id: int
+    description: str
+    required_tools: List[str] = field(default_factory=list)
+    dependencies: List[int] = field(default_factory=list)  # IDs of subtasks that must complete first
+    success_criteria: Optional[str] = None
+
+    # Execution results
+    status: str = "pending"  # pending, running, completed, failed
+    result: Optional[str] = None
+    error: Optional[str] = None
+
+    # Metadata
+    timestamp: float = field(default_factory=time.time)
+    execution_time: float = 0.0
+    cost: float = 0.0
+    tokens_used: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert subtask to dictionary."""
+        return {
+            "id": self.id,
+            "description": self.description,
+            "required_tools": self.required_tools,
+            "dependencies": self.dependencies,
+            "success_criteria": self.success_criteria,
+            "status": self.status,
+            "result": self.result,
+            "error": self.error,
+            "timestamp": self.timestamp,
+            "execution_time": self.execution_time,
+            "cost": self.cost,
+            "tokens_used": self.tokens_used,
+        }
+
+
+@dataclass
+class Plan:
+    """A structured plan with subtasks."""
+
+    subtasks: List[SubTask]
+    goal: str
+    reasoning: str  # Why this plan was chosen
+
+    timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def total_subtasks(self) -> int:
+        """Total number of subtasks."""
+        return len(self.subtasks)
+
+    @property
+    def completed_subtasks(self) -> int:
+        """Number of completed subtasks."""
+        return sum(1 for st in self.subtasks if st.status == "completed")
+
+    @property
+    def failed_subtasks(self) -> int:
+        """Number of failed subtasks."""
+        return sum(1 for st in self.subtasks if st.status == "failed")
+
+    @property
+    def progress_percentage(self) -> float:
+        """Progress as percentage."""
+        if not self.subtasks:
+            return 0.0
+        return (self.completed_subtasks / self.total_subtasks) * 100
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert plan to dictionary."""
+        return {
+            "subtasks": [st.to_dict() for st in self.subtasks],
+            "goal": self.goal,
+            "reasoning": self.reasoning,
+            "timestamp": self.timestamp,
+            "total_subtasks": self.total_subtasks,
+            "completed_subtasks": self.completed_subtasks,
+            "failed_subtasks": self.failed_subtasks,
+            "progress_percentage": self.progress_percentage,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass
+class PlanExecuteResult:
+    """Result of Plan and Execute orchestration."""
+
+    plan: Plan
+    final_answer: str
+    stop_reason: StopReason
+    replans: int = 0  # Number of times we re-planned
+
+    # Performance metrics
+    total_cost: float = 0.0
+    total_execution_time: float = 0.0
+    total_tokens: int = 0
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def success_rate(self) -> float:
+        """Percentage of subtasks that completed successfully."""
+        if not self.plan.subtasks:
+            return 0.0
+        return (self.plan.completed_subtasks / self.plan.total_subtasks) * 100
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to dictionary."""
+        return {
+            "plan": self.plan.to_dict(),
+            "final_answer": self.final_answer,
+            "stop_reason": self.stop_reason.value,
+            "replans": self.replans,
+            "total_cost": self.total_cost,
+            "total_execution_time": self.total_execution_time,
+            "total_tokens": self.total_tokens,
+            "success_rate": self.success_rate,
+            "metadata": self.metadata,
+        }
+
+
+# Plan and Execute Event Types
+
+class PlanExecuteEventType(Enum):
+    """Types of events emitted during Plan and Execute."""
+
+    PLANNING_START = "planning_start"
+    PLANNING_COMPLETE = "planning_complete"
+    REPLANNING_START = "replanning_start"
+    REPLANNING_COMPLETE = "replanning_complete"
+
+    SUBTASK_START = "subtask_start"
+    SUBTASK_PROGRESS = "subtask_progress"
+    SUBTASK_COMPLETE = "subtask_complete"
+    SUBTASK_FAILED = "subtask_failed"
+
+    PLAN_PROGRESS = "plan_progress"  # Overall plan progress update
+    FINAL_ANSWER = "final_answer"
+    ERROR = "error"
+
+
+@dataclass
+class PlanExecuteEvent:
+    """Event emitted during Plan and Execute."""
+
+    event_type: PlanExecuteEventType
+    data: Dict[str, Any]
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert event to dictionary."""
+        return {
+            "event_type": self.event_type.value,
+            "data": self.data,
+            "timestamp": self.timestamp,
+        }
+
+
+# System prompt for Plan and Execute
+
+PLAN_AND_EXECUTE_PLANNING_PROMPT = """You are a planning AI assistant that breaks down complex tasks into structured, executable subtasks.
+
+Your goal: Analyze the user's request and create a detailed execution plan.
+
+CRITICAL: Respond with a JSON plan in this EXACT format:
+
+{{
+  "reasoning": "Brief explanation of your planning strategy",
+  "subtasks": [
+    {{
+      "id": 1,
+      "description": "Clear, specific description of what to do",
+      "required_tools": ["tool1", "tool2"],
+      "dependencies": [],
+      "success_criteria": "How to know this subtask succeeded"
+    }},
+    {{
+      "id": 2,
+      "description": "Next subtask description",
+      "required_tools": ["tool3"],
+      "dependencies": [1],
+      "success_criteria": "Success criteria for this subtask"
+    }}
+  ]
+}}
+
+Available tools:
+{tools}
+
+Planning Guidelines:
+1. **Break down complexity**: Decompose the task into 3-10 clear subtasks
+2. **Order matters**: Arrange subtasks in logical execution order
+3. **Specify dependencies**: Use "dependencies" to indicate which subtasks must complete first
+4. **Be specific**: Each subtask should have a clear, actionable description
+5. **Use available tools**: Only reference tools from the available tools list
+6. **Define success**: Specify concrete success criteria for each subtask
+7. **Keep it simple**: Each subtask should be independently executable
+
+Example Plan:
+User: "Analyze sales data and create a report"
+
+{{
+  "reasoning": "First gather data, then analyze it, finally format results into a report",
+  "subtasks": [
+    {{
+      "id": 1,
+      "description": "Fetch sales data from the database for the last quarter",
+      "required_tools": ["query_database"],
+      "dependencies": [],
+      "success_criteria": "Data retrieved with at least 1000 records"
+    }},
+    {{
+      "id": 2,
+      "description": "Calculate key metrics: total sales, average order value, growth rate",
+      "required_tools": ["calculate"],
+      "dependencies": [1],
+      "success_criteria": "All metrics calculated successfully"
+    }},
+    {{
+      "id": 3,
+      "description": "Generate formatted report with charts and insights",
+      "required_tools": ["create_document"],
+      "dependencies": [2],
+      "success_criteria": "Report created with all sections complete"
+    }}
+  ]
+}}
+
+IMPORTANT:
+- Respond with ONLY the JSON plan, no additional text
+- Ensure JSON is valid and properly formatted
+- Each subtask ID must be unique and sequential
+- Dependencies must reference valid subtask IDs"""
+
+
+PLAN_AND_EXECUTE_REPLAN_PROMPT = """The current plan has encountered issues and needs replanning.
+
+Original Goal: {goal}
+
+Current Plan Status:
+{plan_status}
+
+Failed Subtask: {failed_subtask}
+Error: {error}
+
+Your task: Create a revised plan that addresses the failure and completes the goal.
+
+Respond with a new JSON plan in the same format as before:
+{{
+  "reasoning": "Why the previous plan failed and how this plan fixes it",
+  "subtasks": [...]
+}}
+
+Guidelines for replanning:
+1. **Learn from failure**: Address the specific error that occurred
+2. **Keep successful work**: Don't redo subtasks that already completed successfully
+3. **Adjust approach**: Try different tools or methods if previous ones failed
+4. **Simplify if needed**: Break down failed subtasks into smaller steps
+5. **Add validation**: Include verification subtasks if data issues occurred
+
+Respond with ONLY the revised JSON plan."""

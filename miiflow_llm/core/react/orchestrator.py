@@ -152,7 +152,11 @@ class ReActOrchestrator:
                     # Parse XML incrementally to detect <thinking> and <answer> tags
                     from .parsing.xml_parser import ParseEventType
 
+                    # Track if this chunk was handled by XML parser
+                    chunk_was_parsed = False
+
                     for parse_event in self.parser.parse_streaming(chunk.delta):
+                        chunk_was_parsed = True
                         if parse_event.event_type == ParseEventType.THINKING:
                             # Thinking chunk detected - emit streaming chunk
                             delta = parse_event.data["delta"]
@@ -188,6 +192,10 @@ class ReActOrchestrator:
                         elif parse_event.event_type == ParseEventType.ANSWER_COMPLETE:
                             # Answer complete
                             step.answer = parse_event.data["answer"]
+
+                    # Note: If chunk was not parsed (no XML tags), we accumulate in buffer
+                    # but don't emit yet since we can't distinguish thinking from answer
+                    # without XML tags. We'll classify and emit after streaming completes.
 
                 # Accumulate tool calls if present in chunk
                 # All providers now normalize to dict format via stream normalizers
@@ -310,7 +318,7 @@ class ReActOrchestrator:
                 # If not parsed but we have content, it might be a direct answer
                 if not step.answer:
                     # Check step.thought first (XML-parsed thinking)
-                    if step.thought and self._is_final_answer(step.thought):
+                    if step.thought and await self._is_final_answer(step.thought):
                         logger.debug(
                             f"Step {state.current_step} - Detected final answer in thought without <answer> tags"
                         )
@@ -320,17 +328,13 @@ class ReActOrchestrator:
                         logger.info(
                             f"Step {state.current_step} - No XML tags found, checking buffer content for final answer"
                         )
-                        if self._is_final_answer(assistant_content):
+                        if await self._is_final_answer(assistant_content):
                             logger.info(
                                 f"Step {state.current_step} - Treating buffer content as final answer"
                             )
                             step.answer = assistant_content
-                            # Emit final answer chunks
-                            await self.event_bus.publish(
-                                EventFactory.final_answer_chunk(
-                                    state.current_step, assistant_content, assistant_content
-                                )
-                            )
+                            # Note: Chunks were already emitted in real-time during streaming
+                            # No need to emit again here
 
         except Exception as e:
             self._handle_step_error(step, e, state)
@@ -343,18 +347,84 @@ class ReActOrchestrator:
         # NOTE: This is actually added in _handle_tool_action now with proper tool_call_id
         return step
 
-    def _is_final_answer(self, thought: str) -> bool:
-        """Detect if the thought indicates a final answer using explicit indicators.
+    async def _classify_response_type(self, content: str) -> str:
+        """Use LLM to classify if content is thinking/reasoning or a final answer.
 
-        This method looks for explicit language patterns that indicate the LLM
-        is providing a final answer, rather than reasoning or planning.
+        This is a more robust approach than pattern matching, as it uses
+        semantic understanding to classify the content.
+
+        Args:
+            content: The content to classify
+
+        Returns:
+            "THINKING" if content is reasoning/planning, "ANSWER" if it's a final answer
+        """
+        if not content or len(content.strip()) == 0:
+            return "THINKING"
+
+        # Truncate very long content to save tokens (keep first 500 chars)
+        truncated_content = content[:500] + ("..." if len(content) > 500 else "")
+
+        classification_prompt = f"""Classify this AI assistant response as either "THINKING" or "ANSWER".
+
+THINKING: Internal reasoning, planning next steps, analyzing information, deciding what to do
+Examples:
+- "I need to check the database for this information"
+- "Let me analyze the data from the tool result"
+- "First, I should verify the user's credentials"
+
+ANSWER: Direct response to user, complete solution, final conclusion, stating facts
+Examples:
+- "You have 131 accounts in your database"
+- "The current stock price is $45.23"
+- "Based on the analysis, here are the top 3 recommendations"
+
+Response to classify:
+{truncated_content}
+
+Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
+
+        try:
+            # Create a simple message for classification
+            messages = [
+                Message(role=MessageRole.USER, content=classification_prompt)
+            ]
+
+            # Use low temperature for deterministic classification
+            response = await self.tool_executor._client.achat(
+                messages=messages,
+                temperature=0.0,
+                max_tokens=10  # Only need one word
+            )
+
+            classification = response.message.content.strip().upper()
+
+            # Validate response
+            if "ANSWER" in classification:
+                return "ANSWER"
+            elif "THINKING" in classification:
+                return "THINKING"
+            else:
+                # Fallback to heuristic if LLM returns unexpected response
+                logger.warning(f"Unexpected classification response: {classification}, falling back to heuristic")
+                return "ANSWER" if self._heuristic_is_final_answer(content) else "THINKING"
+
+        except Exception as e:
+            logger.warning(f"LLM classification failed: {e}, falling back to heuristic")
+            return "ANSWER" if self._heuristic_is_final_answer(content) else "THINKING"
+
+    def _heuristic_is_final_answer(self, thought: str) -> bool:
+        """Fallback heuristic for detecting final answers (improved from old pattern matching).
+
+        This is used as a last resort if LLM classification fails.
+        Now uses multiple signals rather than just keywords.
         """
         if not thought or len(thought.strip()) == 0:
             return False
 
         thought_lower = thought.lower()
 
-        # Strong indicators that this is a final answer
+        # Signal 1: Strong indicators that this is a final answer
         final_answer_indicators = [
             "the answer is",
             "final answer",
@@ -365,18 +435,14 @@ class ReActOrchestrator:
             "so the answer",
             "the result is",
             "to answer your question",
-            "the current",  # e.g., "The current stock price is..."
-            "the price is",
-            "the value is",
-            "based on the",  # e.g., "Based on the data..."
+            "based on the",
         ]
 
-        # Check for explicit final answer indicators
         for indicator in final_answer_indicators:
             if indicator in thought_lower:
                 return True
 
-        # Indicators that the LLM needs to do more work (NOT a final answer)
+        # Signal 2: Strong indicators this is NOT a final answer (still thinking)
         needs_more_work_indicators = [
             "i need to",
             "i should",
@@ -390,27 +456,37 @@ class ReActOrchestrator:
             "let's",
         ]
 
-        # If it clearly indicates more work is needed, it's not a final answer
         for indicator in needs_more_work_indicators:
             if indicator in thought_lower:
                 return False
 
-        # Check for declarative statements with numbers/data (suggests an answer)
-        # e.g., "You have 131 accounts", "There are 5 users", "The total is $1000"
+        # Signal 3: Check for declarative statements with data
+        import re
         declarative_patterns = [
             r"\byou have\b",
             r"\bthere (?:are|is)\b",
             r"\bthe (?:total|count|number|result) (?:is|are)\b",
-            r"\b(?:has|have) \d+\b",  # "has 131", "have 5"
+            r"\b(?:has|have) \d+\b",
         ]
-
-        import re
 
         for pattern in declarative_patterns:
             if re.search(pattern, thought_lower):
                 return True
 
+        # Signal 4: Length heuristic (answers typically longer than thinking)
+        if len(thought) > 200:
+            return True
+
         return False
+
+    async def _is_final_answer(self, thought: str) -> bool:
+        """Detect if the thought indicates a final answer.
+
+        Uses intelligent LLM-based classification with heuristic fallback.
+        This replaces the old brittle pattern matching approach.
+        """
+        classification = await self._classify_response_type(thought)
+        return classification == "ANSWER"
 
     async def _execute_reasoning_step(
         self, context: RunContext, state: "ExecutionState"
@@ -457,7 +533,11 @@ class ReActOrchestrator:
                     # Parse XML incrementally
                     from .parsing.xml_parser import ParseEventType
 
+                    # Track if this chunk was handled by XML parser
+                    chunk_was_parsed = False
+
                     for parse_event in self.parser.parse_streaming(chunk.delta):
+                        chunk_was_parsed = True
                         if parse_event.event_type == ParseEventType.THINKING:
                             # Thinking chunk detected - emit streaming chunk
                             delta = parse_event.data["delta"]
@@ -500,6 +580,10 @@ class ReActOrchestrator:
                             # Answer complete
                             step.answer = parse_event.data["answer"]
 
+                    # Note: If chunk was not parsed (no XML tags), we accumulate in buffer
+                    # but don't emit yet since we can't distinguish thinking from answer
+                    # without XML tags. We'll classify and emit after streaming completes.
+
                 # Accumulate metrics
                 if chunk.usage:
                     tokens_used = chunk.usage.total_tokens
@@ -530,19 +614,36 @@ class ReActOrchestrator:
                 f"buffer_len: {len(buffer)}"
             )
 
-            # Warn if we have thinking but NO action or answer (stuck in thinking-only mode)
+            # Detect malformed responses and determine if retry is needed
+            needs_retry = False
+            retry_reason = None
+
+            # Check 1: Thinking-only response (missing action)
             if step.thought and not has_actionable_content:
                 logger.warning(
                     f"Step {state.current_step}: LLM output only <thinking> without <tool_call> or <answer>. "
-                    f"This violates the ReAct pattern. The agent may be stuck."
+                    f"This violates the ReAct pattern."
                 )
+                needs_retry = True
+                retry_reason = "thinking_only"
+
+            # Check 2: Completely empty response
             elif not has_content and not has_valid_step and not buffer.strip():
-                # Completely empty response - treat as error
                 logger.warning(
-                    f"Step {state.current_step}: LLM returned completely empty response. "
-                    f"No thinking, action, or answer detected."
+                    f"Step {state.current_step}: LLM returned completely empty response."
                 )
                 step.error = "LLM returned completely empty response"
+                needs_retry = True
+                retry_reason = "empty_response"
+
+            # Check 3: Content without XML tags
+            elif buffer.strip() and not has_content:
+                logger.warning(
+                    f"Step {state.current_step}: LLM response missing XML tags. "
+                    f"Content present but no <thinking>, <tool_call>, or <answer> detected."
+                )
+                needs_retry = True
+                retry_reason = "missing_xml_tags"
 
             # CRITICAL FIX: Always preserve the assistant's response in conversation history
             # This ensures proper action-observation pairing for the LLM
@@ -575,20 +676,55 @@ class ReActOrchestrator:
                 response_message = Message(role=MessageRole.ASSISTANT, content=assistant_content)
                 context.messages.append(response_message)
                 logger.debug(f"Added assistant message to context: {assistant_content[:100]}...")
-            else:
-                logger.warning(f"Step {state.current_step}: No assistant content to add to context")
-                # Add recovery prompt to break the empty response pattern
-                recovery_prompt = (
-                    "Your previous response was empty. Please provide a valid response using either:\n"
-                    "1. <tool_call> to execute an action, OR\n"
-                    "2. <answer> to provide your final answer.\n"
-                    "Remember: NEVER output only <thinking> or leave the response empty."
-                )
-                recovery_message = Message(role=MessageRole.USER, content=recovery_prompt)
-                context.messages.append(recovery_message)
-                logger.debug(
-                    f"Step {state.current_step} - Added recovery prompt to help LLM recover from empty response"
-                )
+
+            # Add retry prompt if needed
+            if needs_retry:
+                # Track retry attempts to avoid infinite loops
+                if not hasattr(state, 'retry_count'):
+                    state.retry_count = 0
+
+                state.retry_count += 1
+
+                # Only retry once per step to avoid loops
+                if state.retry_count <= 1:
+                    # Craft specific recovery prompt based on the issue
+                    if retry_reason == "thinking_only":
+                        recovery_prompt = (
+                            "Your previous response contained only <thinking> tags without an action. "
+                            "You MUST follow <thinking> with either:\n"
+                            "1. <tool_call name=\"tool_name\">{...}</tool_call> to execute a tool, OR\n"
+                            "2. <answer>Your final answer here</answer> to provide your final response.\n\n"
+                            "NEVER end your response with only <thinking>. Please try again with a complete response."
+                        )
+                    elif retry_reason == "missing_xml_tags":
+                        recovery_prompt = (
+                            "Your previous response did not use proper XML tags. "
+                            "You MUST structure your response using XML tags:\n\n"
+                            "<thinking>Your reasoning here</thinking>\n"
+                            "<tool_call name=\"tool_name\">{...}</tool_call> OR <answer>Your final answer</answer>\n\n"
+                            "Please provide your response again with proper XML structure."
+                        )
+                    else:  # empty_response
+                        recovery_prompt = (
+                            "Your previous response was empty. Please provide a valid response using:\n"
+                            "1. <tool_call name=\"tool_name\">{...}</tool_call> to execute a tool, OR\n"
+                            "2. <answer>Your final answer here</answer> to provide your final response.\n\n"
+                            "Remember to use proper XML tags."
+                        )
+
+                    recovery_message = Message(role=MessageRole.USER, content=recovery_prompt)
+                    context.messages.append(recovery_message)
+                    logger.info(
+                        f"Step {state.current_step} - Added retry prompt for {retry_reason} "
+                        f"(retry {state.retry_count}/1)"
+                    )
+                else:
+                    logger.warning(
+                        f"Step {state.current_step} - Max retries reached for {retry_reason}, "
+                        f"continuing without retry"
+                    )
+                    # Reset retry count for next step
+                    state.retry_count = 0
 
             # Handle tool action if detected (AFTER adding assistant message)
             if step.action and not answer_detected:
