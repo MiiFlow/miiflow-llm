@@ -6,6 +6,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 try:
     import google.generativeai as genai
     from google.generativeai.types import HarmBlockThreshold, HarmCategory
+    from google.generativeai.types import FunctionDeclaration, Tool
 
     GEMINI_AVAILABLE = True
 except ImportError:
@@ -40,8 +41,8 @@ class GeminiClient(ModelClient):
         if not api_key:
             raise AuthenticationError("Gemini API key is required")
 
-        # Configure Gemini
-        genai.configure(api_key=api_key)
+        # Configure Gemini with REST transport (avoids gRPC connection issues)
+        genai.configure(api_key=api_key, transport='rest')
 
         # Initialize the model
         try:
@@ -268,17 +269,44 @@ class GeminiClient(ModelClient):
 
             generation_config = genai.GenerationConfig(**generation_config_params)
 
+            # Prepare tools for Gemini (if provided)
+            gemini_tools = None
+            if tools:
+                # Gemini expects tools wrapped in a Tool object
+                
+                function_declarations = []
+                for tool in tools:
+                    func_decl = FunctionDeclaration(
+                        name=tool["name"],
+                        description=tool["description"],
+                        parameters=tool["parameters"]
+                    )
+                    function_declarations.append(func_decl)
+
+                gemini_tools = [Tool(function_declarations=function_declarations)]
+
             response = await asyncio.to_thread(
                 self.client.generate_content,
                 prompt,
                 generation_config=generation_config,
                 safety_settings=self.safety_settings,
+                tools=gemini_tools,
             )
 
+            content = ""
+            tool_calls = []
+
             if response.candidates and response.candidates[0].content.parts:
-                content = response.candidates[0].content.parts[0].text
-            else:
-                content = ""
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'function_call') and part.function_call:
+                        func_call = part.function_call
+                        tool_call = {
+                            "name": func_call.name,
+                            "arguments": dict(func_call.args) if func_call.args else {}
+                        }
+                        tool_calls.append(tool_call)
+                    elif hasattr(part, 'text') and part.text:
+                        content += part.text
 
             usage = TokenCount()
             if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -288,7 +316,11 @@ class GeminiClient(ModelClient):
                     total_tokens=getattr(response.usage_metadata, "total_token_count", 0),
                 )
 
-            response_message = Message(role=MessageRole.ASSISTANT, content=content)
+            response_message = Message(
+                role=MessageRole.ASSISTANT,
+                content=content,
+                tool_calls=tool_calls if tool_calls else None
+            )
 
             from ..core.client import ChatResponse
 
