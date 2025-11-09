@@ -15,6 +15,49 @@ from .tool_executor import AgentToolExecutor
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_error_message(error_msg: str) -> str:
+    """Sanitize error messages by removing stack traces and technical details.
+
+    Keeps the error message user-friendly while preserving enough context
+    for the LLM to understand what went wrong.
+    """
+    if not error_msg:
+        return "Unknown error occurred"
+
+    # Split by common stack trace indicators
+    lines = error_msg.split('\n')
+    sanitized_lines = []
+
+    for line in lines:
+        # Skip lines that look like stack traces
+        if any(indicator in line for indicator in [
+            'Traceback (most recent call last)',
+            'File "',
+            'line ',
+            '  at ',
+            'Stack trace:',
+            '^',  # Often used to point to error location
+        ]):
+            continue
+
+        # Skip lines with only whitespace or technical markers
+        if not line.strip() or line.strip() in ['---', '===']:
+            continue
+
+        sanitized_lines.append(line.strip())
+
+    # If we filtered everything out, return the first line of the original
+    if not sanitized_lines:
+        return lines[0] if lines else "Unknown error occurred"
+
+    # Join and limit length
+    result = ' '.join(sanitized_lines)
+    if len(result) > 500:
+        result = result[:500] + "..."
+
+    return result
+
+
 class ReActOrchestrator:
     """ReAct orchestrator with clean separation of concerns."""
 
@@ -55,8 +98,10 @@ class ReActOrchestrator:
                     await self._publish_final_answer_event(step, execution_state)
                     break
 
-                if step.is_error_step:
-                    break
+                # Don't break on error steps - let LLM see the error observation
+                # and continue reasoning to provide a natural response
+                # if step.is_error_step:
+                #     break
 
             return self._build_result(execution_state)
 
@@ -198,17 +243,54 @@ class ReActOrchestrator:
                         # Extract index (use 0 for first/only tool in ReAct single-action mode)
                         idx = len(accumulated_tool_calls) if len(accumulated_tool_calls) == 0 else 0
 
-                        # Store or update the tool call
-                        accumulated_tool_calls[idx] = {
-                            "id": tool_call_dict.get("id"),
-                            "type": tool_call_dict.get("type", "function"),
-                            "function": {
-                                "name": tool_call_dict.get("function", {}).get("name"),
-                                "arguments": tool_call_dict.get("function", {}).get(
-                                    "arguments", {}
-                                ),
-                            },
-                        }
+                        # Initialize on first chunk, merge on subsequent chunks
+                        if idx not in accumulated_tool_calls:
+                            # First chunk: initialize structure
+                            accumulated_tool_calls[idx] = {
+                                "id": None,
+                                "type": "function",
+                                "function": {
+                                    "name": None,
+                                    "arguments": None,  # Will be set based on provider format
+                                },
+                            }
+
+                        # Update ID if present in this chunk
+                        if tool_call_dict.get("id") is not None:
+                            accumulated_tool_calls[idx]["id"] = tool_call_dict.get("id")
+
+                        # Update type if present
+                        if tool_call_dict.get("type") is not None:
+                            accumulated_tool_calls[idx]["type"] = tool_call_dict.get("type")
+
+                        # Update function name if present
+                        function_data = tool_call_dict.get("function", {})
+                        if function_data.get("name") is not None:
+                            accumulated_tool_calls[idx]["function"]["name"] = function_data.get("name")
+
+                        # Handle arguments based on format:
+                        # - OpenAI: sends progressively longer strings in each chunk
+                        # - Anthropic: sends complete dict in final chunk
+                        new_args = function_data.get("arguments")
+                        if new_args is not None:
+                            current_args = accumulated_tool_calls[idx]["function"]["arguments"]
+
+                            if isinstance(new_args, str):
+                                # OpenAI format: string that grows with each chunk
+                                # Provider already accumulates, so just use the latest value
+                                accumulated_tool_calls[idx]["function"]["arguments"] = new_args
+                            elif isinstance(new_args, dict):
+                                # Anthropic format: dict (usually sent complete in one chunk)
+                                if current_args is None or not isinstance(current_args, dict):
+                                    accumulated_tool_calls[idx]["function"]["arguments"] = new_args
+                                else:
+                                    # Merge dicts if both exist (defensive)
+                                    current_args.update(new_args)
+                            else:
+                                # Unexpected format, log and store as-is
+                                logger.warning(f"Unexpected arguments type in chunk: {type(new_args)}")
+                                accumulated_tool_calls[idx]["function"]["arguments"] = new_args
+
                         logger.debug(f"Tool call accumulated: {accumulated_tool_calls[idx]}")
 
                 # Accumulate metrics
@@ -239,19 +321,40 @@ class ReActOrchestrator:
                 # Parse arguments based on format:
                 # - OpenAI: string (JSON) that needs parsing
                 # - Anthropic: already a dict
-                if isinstance(tool_args, str):
+                if tool_args is None:
+                    logger.warning(
+                        f"Step {state.current_step} - Tool '{step.action}' has None arguments "
+                        "(streaming may be incomplete)"
+                    )
+                    step.action_input = {}
+                elif isinstance(tool_args, str):
                     import json
 
-                    try:
-                        step.action_input = json.loads(tool_args)
-                    except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse tool arguments as JSON: {tool_args}")
+                    # Handle empty string case
+                    if not tool_args or tool_args.strip() == "":
+                        logger.warning(
+                            f"Step {state.current_step} - Tool '{step.action}' has empty arguments string"
+                        )
                         step.action_input = {}
+                    else:
+                        try:
+                            step.action_input = json.loads(tool_args)
+                        except json.JSONDecodeError as e:
+                            logger.error(
+                                f"Step {state.current_step} - Failed to parse tool arguments as JSON. "
+                                f"Error: {e}. Arguments preview: {tool_args[:200]}..."
+                            )
+                            step.error = f"Malformed tool arguments: Invalid JSON format"
+                            step.action_input = {}
                 elif isinstance(tool_args, dict):
                     # Already parsed (Anthropic format)
                     step.action_input = tool_args
                 else:
-                    logger.warning(f"Unexpected tool_args type: {type(tool_args)}")
+                    logger.error(
+                        f"Step {state.current_step} - Unexpected tool_args type: {type(tool_args)}, "
+                        f"value: {tool_args}"
+                    )
+                    step.error = f"Malformed tool call: arguments type is {type(tool_args).__name__}"
                     step.action_input = {}
 
                 # Validate tool name is not None or empty
@@ -268,20 +371,76 @@ class ReActOrchestrator:
                     )
                     context.messages.append(response_message)
                     # Skip tool execution, continue to next step
-                else:
-                    # Add assistant message with both text and tool calls to context
-                    # Convert accumulated_tool_calls to list format for message
-                    tool_calls_list = list(accumulated_tool_calls.values())
+                # Validate required parameters are present
+                elif step.action_input is not None:
+                    # Get tool schema to check required parameters
+                    tool_schema = self.tool_executor.get_tool_schema(step.action)
+                    required_params = tool_schema.get("parameters", {}).get("required", [])
 
+                    # Check if any required parameters are missing
+                    if required_params:
+                        missing_params = [
+                            param for param in required_params
+                            if param not in step.action_input
+                        ]
+
+                        if missing_params:
+                            logger.error(
+                                f"Step {state.current_step} - Tool '{step.action}' missing required parameters: "
+                                f"{missing_params}. Provided parameters: {list(step.action_input.keys())}"
+                            )
+                            step.error = (
+                                f"Tool '{step.action}' requires parameters: {', '.join(missing_params)}. "
+                                f"This may indicate incomplete streaming or malformed LLM response."
+                            )
+                            # Add assistant message to context for history
+                            response_message = Message(
+                                role=MessageRole.ASSISTANT,
+                                content=assistant_content,
+                                tool_calls=None,
+                            )
+                            context.messages.append(response_message)
+                            # Skip tool execution
+                        else:
+                            # All required parameters present, execute tool
+                            # Add assistant message with both text and tool calls to context
+                            tool_calls_list = list(accumulated_tool_calls.values())
+
+                            response_message = Message(
+                                role=MessageRole.ASSISTANT,
+                                content=assistant_content,
+                                tool_calls=tool_calls_list,
+                            )
+                            context.messages.append(response_message)
+
+                            # Execute the tool
+                            await self._handle_tool_action(step, context, state, tool_call_id=tool_call_id)
+                    else:
+                        # No required parameters, safe to execute
+                        # Add assistant message with both text and tool calls to context
+                        tool_calls_list = list(accumulated_tool_calls.values())
+
+                        response_message = Message(
+                            role=MessageRole.ASSISTANT,
+                            content=assistant_content,
+                            tool_calls=tool_calls_list,
+                        )
+                        context.messages.append(response_message)
+
+                        # Execute the tool
+                        await self._handle_tool_action(step, context, state, tool_call_id=tool_call_id)
+                else:
+                    # action_input is None (shouldn't happen, but defensive)
+                    logger.error(
+                        f"Step {state.current_step} - Tool '{step.action}' has None action_input"
+                    )
+                    step.error = "Internal error: action_input is None"
                     response_message = Message(
                         role=MessageRole.ASSISTANT,
                         content=assistant_content,
-                        tool_calls=tool_calls_list,  # Include tool calls for proper message history
+                        tool_calls=None,
                     )
                     context.messages.append(response_message)
-
-                    # Execute the tool
-                    await self._handle_tool_action(step, context, state, tool_call_id=tool_call_id)
 
             # No tool calls - this is a final answer (with XML tags parsed)
             else:
@@ -757,8 +916,10 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
             if result.success:
                 step.observation = str(result.output)
             else:
-                step.error = result.error
-                step.observation = f"Tool execution failed: {result.error}"
+                # Sanitize error message for LLM consumption
+                sanitized_error = _sanitize_error_message(result.error)
+                step.error = result.error  # Keep full error for debugging
+                step.observation = f"Tool execution failed: {sanitized_error}"
 
             # Update metrics
             step.cost += getattr(result, "cost", 0.0)
@@ -782,8 +943,10 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
                 )
 
         except Exception as e:
-            step.error = f"Tool execution error: {str(e)}"
-            step.observation = f"Tool '{step.action}' failed: {str(e)}"
+            # Sanitize error message for LLM consumption
+            sanitized_error = _sanitize_error_message(str(e))
+            step.error = f"Tool execution error: {str(e)}"  # Keep full error for debugging
+            step.observation = f"Tool '{step.action}' failed: {sanitized_error}"
             logger.error(f"Tool execution failed: {e}", exc_info=True)
 
             await self.event_bus.publish(

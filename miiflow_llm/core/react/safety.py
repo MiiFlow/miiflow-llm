@@ -8,6 +8,40 @@ from typing import Any, Dict, List, Optional, Set
 from .data import ReActStep, StopReason
 
 
+def make_hashable(obj: Any) -> Any:
+    """
+    Recursively convert an object to a hashable type.
+
+    This is needed for creating signatures from tool inputs that may contain
+    lists, dicts, or other unhashable types.
+
+    Args:
+        obj: Object to convert
+
+    Returns:
+        Hashable version of the object
+    """
+    if obj is None:
+        return None
+    elif isinstance(obj, (str, int, float, bool)):
+        return obj
+    elif isinstance(obj, dict):
+        # Convert dict to frozenset of (key, hashable_value) tuples
+        return frozenset((k, make_hashable(v)) for k, v in obj.items())
+    elif isinstance(obj, (list, tuple)):
+        # Convert list/tuple to tuple of hashable elements
+        return tuple(make_hashable(item) for item in obj)
+    elif isinstance(obj, set):
+        # Convert set to frozenset of hashable elements
+        return frozenset(make_hashable(item) for item in obj)
+    elif isinstance(obj, frozenset):
+        # Already hashable, but items might not be
+        return frozenset(make_hashable(item) for item in obj)
+    else:
+        # For other types, try to convert to string as fallback
+        return str(obj)
+
+
 @dataclass
 class StopCondition(ABC):
     """Abstract base class for stop conditions."""
@@ -160,10 +194,9 @@ class InfiniteLoopDetector(StopCondition):
         action_signatures = []
         for step in steps:
             if step.is_action_step:
-                signature = (
-                    step.action,
-                    frozenset(step.action_input.items()) if step.action_input else frozenset(),
-                )
+                # Convert action_input to hashable form for signature matching
+                hashable_input = make_hashable(step.action_input) if step.action_input else None
+                signature = (step.action, hashable_input)
                 action_signatures.append(signature)
 
         if len(action_signatures) < self.pattern_length * self.min_repetitions:
