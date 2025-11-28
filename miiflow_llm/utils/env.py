@@ -46,7 +46,6 @@ def get_api_key(provider: str) -> Optional[str]:
         'groq': 'GROQ_API_KEY',
         'xai': 'XAI_API_KEY',
         'gemini': 'GEMINI_API_KEY',
-        'together': 'TOGETHERAI_API_KEY',
         'openrouter': 'OPENROUTER_API_KEY',
         'mistral': 'MISTRAL_API_KEY',
         'deepseek': 'DEEPSEEK_API_KEY',

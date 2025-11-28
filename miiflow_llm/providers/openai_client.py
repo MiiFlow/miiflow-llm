@@ -13,6 +13,7 @@ from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount, UsageData
 from ..core.streaming import StreamChunk
+from ..models.openai import get_token_param_name, supports_temperature
 
 
 class OpenAIStreaming:
@@ -242,11 +243,11 @@ class OpenAIClient(OpenAIStreaming, ModelClient):
                 "messages": openai_messages,
             }
 
-            if not self.model.startswith("gpt-5"):
+            if supports_temperature(self.model):
                 request_params["temperature"] = temperature
 
             if max_tokens:
-                request_params["max_tokens"] = max_tokens
+                request_params[get_token_param_name(self.model)] = max_tokens
             if tools:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
@@ -321,11 +322,11 @@ class OpenAIClient(OpenAIStreaming, ModelClient):
                 "stream": True,
             }
 
-            if not self.model.startswith("gpt-5"):
+            if supports_temperature(self.model):
                 request_params["temperature"] = temperature
 
             if max_tokens:
-                request_params["max_tokens"] = max_tokens
+                request_params[get_token_param_name(self.model)] = max_tokens
             if tools:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"

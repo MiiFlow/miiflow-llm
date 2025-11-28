@@ -18,6 +18,10 @@ class ParameterSchema:
     minimum: Optional[float] = None
     maximum: Optional[float] = None
     pattern: Optional[str] = None
+    # Support for nested schemas (arrays and objects)
+    items: Optional[Dict[str, Any]] = None
+    properties: Optional[Dict[str, Any]] = None
+    additionalProperties: Optional[bool] = None
     
     def to_json_schema_property(self) -> Dict[str, Any]:
         """Convert to JSON Schema property format."""
@@ -25,7 +29,7 @@ class ParameterSchema:
             "type": self.type.value,
             "description": self.description
         }
-        
+
         if self.default is not None:
             prop["default"] = self.default
         if self.enum is not None:
@@ -36,7 +40,15 @@ class ParameterSchema:
             prop["maximum"] = self.maximum
         if self.pattern is not None:
             prop["pattern"] = self.pattern
-            
+
+        # Add nested schema support for arrays and objects
+        if self.items is not None:
+            prop["items"] = self.items
+        if self.properties is not None:
+            prop["properties"] = self.properties
+        if self.additionalProperties is not None:
+            prop["additionalProperties"] = self.additionalProperties
+
         return prop
 
 
@@ -119,7 +131,7 @@ class ToolSchema:
         
         provider = provider.lower()
         
-        if provider in ["openai", "groq", "together", "xai", "mistral", "ollama"]:
+        if provider in ["openai", "groq", "xai", "mistral", "ollama"]:
             # OpenAI format
             return {
                 "type": "function",

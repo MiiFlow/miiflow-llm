@@ -61,16 +61,6 @@ client = LLMClient.create("groq", model="llama-3.3-70b-versatile")
 
 **Features:** Fast inference, free tier
 
-## TogetherAI
-
-```python
-client = LLMClient.create("together", model="meta-llama/Llama-3.3-70B-Instruct-Turbo")
-```
-
-**API Key:** `TOGETHERAI_API_KEY`
-
-**Example Models:** `meta-llama/Llama-3.3-70B-Instruct-Turbo`, `meta-llama/Llama-3.1-405B-Instruct-Turbo`, `mistralai/Mixtral-8x7B-Instruct-v0.1`
-
 ## OpenRouter
 
 ```python
@@ -156,7 +146,6 @@ ANTHROPIC_API_KEY=sk-ant-...
 GEMINI_API_KEY=AIza...
 GROQ_API_KEY=gsk_...
 XAI_API_KEY=xai-...
-TOGETHERAI_API_KEY=...
 OPENROUTER_API_KEY=sk-or-...
 MISTRAL_API_KEY=...
 ```

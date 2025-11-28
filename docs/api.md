@@ -22,7 +22,7 @@ client = LLMClient.create(
 ```
 
 **Parameters:**
-- `provider` (str): `"openai"`, `"anthropic"`, `"gemini"`, `"groq"`, `"together"`, `"openrouter"`, `"mistral"`, `"xai"`
+- `provider` (str): `"openai"`, `"anthropic"`, `"gemini"`, `"groq"`, `"openrouter"`, `"mistral"`, `"xai"`, `"ollama"`, `"bedrock"`
 - `model` (str): Model name (provider-specific)
 - `temperature` (float): 0.0-2.0, default varies by provider
 - `max_tokens` (int): Max completion tokens

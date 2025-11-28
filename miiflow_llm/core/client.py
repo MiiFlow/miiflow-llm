@@ -27,6 +27,7 @@ from .tools import FunctionTool, ToolRegistry
 @dataclass
 class ChatResponse:
     """Response from a chat completion request."""
+
     message: Message
     usage: TokenCount
     model: str
@@ -114,6 +115,14 @@ class ModelClient(ABC):
         """Convert universal schema to provider-specific format."""
         # Default implementation - subclasses should override for provider-specific formats
         return schema
+
+    def supports_vision(self) -> bool:
+        """Check if the model supports vision/image inputs.
+
+        Default implementation assumes all models support vision.
+        This method exists for future compatibility if vision checks are needed.
+        """
+        return True
 
     @abstractmethod
     async def achat(

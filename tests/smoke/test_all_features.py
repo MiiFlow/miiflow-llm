@@ -71,7 +71,6 @@ PROVIDERS_STREAMING = [
     {"provider": "anthropic", "model": "claude-3-5-haiku-20241022", "api_key_env": "ANTHROPIC_API_KEY"},
     {"provider": "gemini", "model": "gemini-2.5-flash", "api_key_env": "GOOGLE_API_KEY"},
     {"provider": "groq", "model": "llama-3.1-8b-instant", "api_key_env": "GROQ_API_KEY"},
-    {"provider": "together", "model": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "api_key_env": "TOGETHERAI_API_KEY"},
 ]
 
 PROVIDERS_TOOL_CALLING = [

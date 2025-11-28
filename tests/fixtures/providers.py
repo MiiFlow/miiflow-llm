@@ -74,15 +74,6 @@ ALL_PROVIDERS = [
         supports_tools=True
     ),
     ProviderConfig(
-        name="together",
-        model="meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-        api_key_env="TOGETHERAI_API_KEY",
-        supports_vision=False,
-        supports_json=False,
-        supports_streaming=True,
-        supports_tools=False
-    ),
-    ProviderConfig(
         name="mistral",
         model="mistral-small-latest",
         api_key_env="MISTRAL_API_KEY",

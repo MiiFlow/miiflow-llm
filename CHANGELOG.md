@@ -5,7 +5,7 @@ All notable changes to miiflow-llm will be documented here.
 ## [0.1.0] - TBD
 
 ### Added
-- Unified interface for 9 LLM providers (OpenAI, Anthropic, Google, Groq, TogetherAI, OpenRouter, Mistral, XAI)
+- Unified interface for 9 LLM providers (OpenAI, Anthropic, Google, Groq, OpenRouter, Mistral, XAI, Ollama, Bedrock)
 - Support for latest models (GPT-5, Claude 4)
 - Streaming with unified StreamChunk format
 - ReAct agents with XML format

@@ -165,7 +165,7 @@ __package_info__ = {
         "Easy-to-use decorators"
     ],
     "supported_providers": [
-        "OpenAI", "Anthropic", "Google Gemini", "Groq", 
-        "Mistral", "Together AI", "Ollama", "OpenRouter", "xAI"
+        "OpenAI", "Anthropic", "Google Gemini", "Groq",
+        "Mistral", "Ollama", "OpenRouter", "xAI"
     ]
 }

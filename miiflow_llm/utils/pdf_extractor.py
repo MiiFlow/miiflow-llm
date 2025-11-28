@@ -259,16 +259,16 @@ def _smart_chunk_text(text: str, chunk_size: int, overlap: int) -> List[Dict[str
     """Smart chunking that respects sentence and paragraph boundaries."""
     chunks = []
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-    
+
     current_chunk = ""
     current_pages = []
     chunk_index = 0
-    
+
     for paragraph in paragraphs:
         page_num = _extract_page_number(paragraph)
         if page_num:
             current_pages.append(page_num)
-        
+
         if current_chunk and len(current_chunk) + len(paragraph) > chunk_size:
             chunks.append({
                 "text": current_chunk.strip(),
@@ -277,25 +277,29 @@ def _smart_chunk_text(text: str, chunk_size: int, overlap: int) -> List[Dict[str
                 "chunk_type": "smart",
                 "char_count": len(current_chunk)
             })
-            
+
             if overlap > 0 and len(current_chunk) > overlap:
                 overlap_text = current_chunk[-overlap:]
                 sentence_end = overlap_text.rfind('. ')
                 if sentence_end > overlap // 2:
                     overlap_text = overlap_text[sentence_end + 2:]
-                
+
                 current_chunk = overlap_text + "\n\n" + paragraph
+                # Reset current_pages and extract page numbers from overlap + new paragraph
+                current_pages = _extract_page_numbers_from_text(overlap_text)
+                if page_num:
+                    current_pages.append(page_num)
             else:
                 current_chunk = paragraph
                 current_pages = [page_num] if page_num else []
-            
+
             chunk_index += 1
         else:
             if current_chunk:
                 current_chunk += "\n\n" + paragraph
             else:
                 current_chunk = paragraph
-    
+
     if current_chunk.strip():
         chunks.append({
             "text": current_chunk.strip(),
@@ -304,7 +308,7 @@ def _smart_chunk_text(text: str, chunk_size: int, overlap: int) -> List[Dict[str
             "chunk_type": "smart",
             "char_count": len(current_chunk)
         })
-    
+
     return chunks
 
 

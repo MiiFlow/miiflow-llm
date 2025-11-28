@@ -120,10 +120,18 @@ class ReActOrchestrator:
             context: Run context with messages list
 
         Raises:
-            ValueError: If query is empty or context is invalid
+            ValueError: If query is empty AND no user message in context
         """
+        # Query can be empty if user message is already in context.messages
+        # Check if there's at least a user message in context
         if not query or not query.strip():
-            raise ValueError("Query cannot be empty")
+            # Allow empty query if there's already a user message in context
+            has_user_message = any(
+                msg.role == MessageRole.USER
+                for msg in (context.messages or [])
+            )
+            if not has_user_message:
+                raise ValueError("Query cannot be empty when no user message exists in context")
 
         if not hasattr(context, "messages"):
             raise ValueError("Context must have a messages attribute")
@@ -151,7 +159,7 @@ class ReActOrchestrator:
                 f"This may override ReAct XML tag instructions. "
                 f"First system prompt preview: {existing_system_prompts[0].content[:200]}..."
             )
-            # FFIX: Merge assistant's system prompt with ReAct prompt instead of having two separate ones
+            # Merge assistant's system prompt with ReAct prompt instead of having two separate ones
             assistant_prompt = existing_system_prompts[0].content
             merged_prompt = f"""{assistant_prompt}
 
@@ -171,7 +179,15 @@ class ReActOrchestrator:
             messages = [Message(role=MessageRole.SYSTEM, content=system_prompt)]
             messages.extend(context.messages)
 
-        messages.append(Message(role=MessageRole.USER, content=query))
+        # Only append query as a new user message if:
+        # 1. Query is not empty AND
+        # 2. No user message already exists at the end
+        # This prevents duplicate messages when user message is already in context
+        if query and query.strip():
+            last_msg = messages[-1] if messages else None
+            if not last_msg or last_msg.role != MessageRole.USER:
+                messages.append(Message(role=MessageRole.USER, content=query))
+
         context.messages = messages
 
     async def _should_stop(self, state: "ExecutionState") -> bool:

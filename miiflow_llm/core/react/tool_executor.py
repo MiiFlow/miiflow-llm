@@ -29,7 +29,9 @@ class AgentToolExecutor:
         try:
             self._disable_all_tools()
             return await self._client.achat(
-                messages=messages, temperature=temperature or self.agent.temperature
+                messages=messages,
+                temperature=temperature or self.agent.temperature,
+                max_tokens=self.agent.max_tokens,
             )
         finally:
             self._restore_tool_state(saved_state)
@@ -41,7 +43,9 @@ class AgentToolExecutor:
         try:
             self._disable_all_tools()
             async for chunk in self._client.astream_chat(
-                messages=messages, temperature=temperature or self.agent.temperature
+                messages=messages,
+                temperature=temperature or self.agent.temperature,
+                max_tokens=self.agent.max_tokens,
             ):
                 yield chunk
         finally:
@@ -54,7 +58,10 @@ class AgentToolExecutor:
         # Call the underlying client directly (not the LLMClient wrapper)
         # to avoid re-registering already-formatted tools
         return await self._client.client.achat(
-            messages=messages, tools=tools, temperature=temperature or self.agent.temperature
+            messages=messages,
+            tools=tools,
+            temperature=temperature or self.agent.temperature,
+            max_tokens=self.agent.max_tokens,
         )
 
     async def stream_with_tools(self, messages: List, temperature: float = None):
@@ -63,7 +70,10 @@ class AgentToolExecutor:
 
         # Call the underlying client directly (not the LLMClient wrapper)
         async for chunk in self._client.client.astream_chat(
-            messages=messages, tools=tools, temperature=temperature or self.agent.temperature
+            messages=messages,
+            tools=tools,
+            temperature=temperature or self.agent.temperature,
+            max_tokens=self.agent.max_tokens,
         ):
             yield chunk
 

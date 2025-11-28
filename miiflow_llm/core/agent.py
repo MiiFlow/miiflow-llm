@@ -82,6 +82,7 @@ class Agent(Generic[Deps, Result]):
         retries: int = 1,
         max_iterations: int = 10,
         temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
         tools: Optional[List[FunctionTool]] = None,
         use_native_tool_calling: bool = True,
         json_schema: Optional[Dict[str, Any]] = None,
@@ -94,6 +95,7 @@ class Agent(Generic[Deps, Result]):
         self.retries = retries
         self.max_iterations = max_iterations
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.use_native_tool_calling = use_native_tool_calling
         self.json_schema = json_schema
 
@@ -141,7 +143,7 @@ class Agent(Generic[Deps, Result]):
 
         context = RunContext(deps=deps, messages=message_history or [])
 
-        # Add system prompt if provided
+        # Add system prompt if provided - INSERT at the beginning, not append
         if self.system_prompt:
             if callable(self.system_prompt):
                 system_content = self.system_prompt(context)
@@ -149,11 +151,12 @@ class Agent(Generic[Deps, Result]):
                 system_content = self.system_prompt
 
             system_msg = Message(role=MessageRole.SYSTEM, content=system_content)
-            context.messages.append(system_msg)
+            context.messages.insert(0, system_msg)
 
-        # Add user message
-        user_msg = Message(role=MessageRole.USER, content=user_prompt)
-        context.messages.append(user_msg)
+        # Add user message only if provided and not empty
+        if user_prompt and user_prompt.strip():
+            user_msg = Message(role=MessageRole.USER, content=user_prompt)
+            context.messages.append(user_msg)
 
         # Execute with retries
         for attempt in range(self.retries):
@@ -214,7 +217,7 @@ class Agent(Generic[Deps, Result]):
             async for event in self.stream_plan_execute(
                 user_prompt, context, max_replans=self.max_iterations // 5  # Default max replans
             ):
-                if hasattr(event, 'event_type') and event.event_type.value == "final_answer":
+                if hasattr(event, "event_type") and event.event_type.value == "final_answer":
                     final_answer = event.data.get("answer", "")
                     break
 
@@ -355,7 +358,7 @@ class Agent(Generic[Deps, Result]):
         query: str,
         context: RunContext,
         max_replans: int = 2,
-        existing_plan = None,  # NEW: Optional pre-generated plan from combined routing
+        existing_plan=None,  # NEW: Optional pre-generated plan from combined routing
     ):
         """Run agent in Plan and Execute mode with streaming events.
 
@@ -366,9 +369,9 @@ class Agent(Generic[Deps, Result]):
             existing_plan: Optional pre-generated Plan object from combined routing step.
                           If provided, skips initial plan generation (saves ~2-5s)
         """
-        from .react.plan_execute_orchestrator import PlanAndExecuteOrchestrator
         from .react import ReActFactory
         from .react.events import EventBus
+        from .react.plan_execute_orchestrator import PlanAndExecuteOrchestrator
         from .react.safety import SafetyManager
         from .react.tool_executor import AgentToolExecutor
 
@@ -433,6 +436,34 @@ class Agent(Generic[Deps, Result]):
         finally:
             event_bus.unsubscribe(real_time_stream)
 
+    def _prepare_messages_for_llm(self, messages: List[Message]) -> List[Message]:
+        """Prepare messages for LLM by filtering out mid-conversation SYSTEM messages.
+
+        Claude requires alternating USER/ASSISTANT messages. SYSTEM messages in the middle
+        of the conversation (e.g., tool execution context) break this pattern and cause errors.
+
+        This function keeps only the first SYSTEM message (assistant instructions) and filters
+        out all subsequent SYSTEM messages.
+        """
+        if not messages:
+            return messages
+
+        result = []
+        first_system_seen = False
+
+        for msg in messages:
+            if msg.role == MessageRole.SYSTEM:
+                if not first_system_seen:
+                    # Keep the first SYSTEM message (assistant instructions)
+                    result.append(msg)
+                    first_system_seen = True
+                # Skip all other SYSTEM messages (tool execution context, etc.)
+            else:
+                # Keep all USER and ASSISTANT messages
+                result.append(msg)
+
+        return result
+
     async def stream_single_hop(
         self, user_prompt: str, *, context: RunContext[Deps]
     ) -> AsyncIterator[Dict[str, Any]]:
@@ -460,11 +491,15 @@ class Agent(Generic[Deps, Result]):
             final_tool_calls = None
             has_tool_calls = False
 
+            # Prepare messages for LLM (filter out mid-conversation SYSTEM messages)
+            llm_messages = self._prepare_messages_for_llm(context.messages)
+
             # Stream LLM response
             async for chunk in self.client.astream_chat(
-                messages=context.messages,
+                messages=llm_messages,
                 tools=self._tools if self._tools else None,
                 temperature=self.temperature,
+                max_tokens=self.max_tokens,
                 json_schema=self.json_schema,
             ):
                 if chunk.delta:
@@ -481,9 +516,10 @@ class Agent(Generic[Deps, Result]):
             # If we had tool calls, get them properly by making a non-streaming call
             if has_tool_calls:
                 response = await self.client.achat(
-                    messages=context.messages,
+                    messages=llm_messages,
                     tools=self._tools if self._tools else None,
                     temperature=self.temperature,
+                    max_tokens=self.max_tokens,
                     json_schema=self.json_schema,
                 )
                 final_tool_calls = response.message.tool_calls
@@ -500,10 +536,13 @@ class Agent(Generic[Deps, Result]):
                 await self._execute_tool_calls(final_tool_calls, context)
 
                 yield {"event": "tools_complete", "data": {}}
+                # Re-filter messages after tool execution (tool results added to context.messages)
+                llm_messages = self._prepare_messages_for_llm(context.messages)
                 final_response = await self.client.achat(
-                    messages=context.messages,
+                    messages=llm_messages,
                     tools=None,
                     temperature=self.temperature,
+                    max_tokens=self.max_tokens,
                     json_schema=self.json_schema,
                 )
                 context.messages.append(final_response.message)

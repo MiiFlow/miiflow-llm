@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..agent import RunContext
 from ..message import Message, MessageRole
@@ -203,41 +203,35 @@ class PlanAndExecuteOrchestrator:
             )
 
     async def _generate_plan(self, query: str, context: RunContext) -> Plan:
-        """Generate initial plan for the query using tool-based planning.
+        """Generate initial plan for the query using direct LLM call with JSON schema.
 
-        Uses function tool calling to create structured plans. This approach:
-        - Hides raw JSON from users (no PLANNING_THINKING_CHUNK events)
-        - More reliable than JSON schema (LLMs trained on tool calling)
-        - Broader provider support (all major LLM providers support tools)
+        Calls LLM directly (not via Agent wrapper) for simpler message handling:
+        - Direct control over message ordering (SYSTEM first, then conversation)
+        - No duplicate user messages
+        - More reliable than tool calling (no tool execution issues)
+        - Universal provider support (all LLMs support JSON mode)
 
         Args:
             query: User's goal
-            context: Run context
+            context: Run context with conversation history
 
         Returns:
             Plan with subtasks
         """
-        from miiflow_llm.core.agent import Agent, AgentType
-
-        from .data import PLAN_AND_EXECUTE_PLANNING_PROMPT, create_plan_tool
+        from .data import PLAN_SCHEMA
 
         await self._publish_event(PlanExecuteEventType.PLANNING_START, {"goal": query})
 
         # Emit a "Creating plan..." message so frontend shows planning mode
-        # (Tool-based planning doesn't stream, so we need this placeholder)
         await self._publish_event(
             PlanExecuteEventType.PLANNING_THINKING_CHUNK,
             {"delta": "", "accumulated": "Analyzing task and creating execution plan..."},
         )
 
         try:
-            # Create planning tool
-            planning_tool = create_plan_tool()
-
-            # Build simplified planning prompt for tool-based approach
-            # (The tool schema handles structure, so we just need guidance on WHAT makes a good plan)
+            # Build planning prompt for JSON mode
             tools_info = self.tool_executor.build_tools_description()
-            planning_prompt = f"""You are a planning assistant. Your job is to analyze the user's task and create an execution plan using the create_plan tool.
+            planning_prompt = f"""You are a planning assistant. Your job is to analyze the user's task and create an execution plan in JSON format.
 
 Available tools for execution:
 {tools_info}
@@ -255,95 +249,56 @@ Planning Principles:
 4. Specify required tools for each subtask
 5. Define clear success criteria
 
-Call the create_plan tool with your reasoning and list of subtasks."""
+Respond with a JSON object containing:
+- reasoning: Brief explanation of your planning strategy
+- subtasks: Array of subtasks (can be empty for simple queries)
 
-            # Create a SINGLE_HOP agent with just the planning tool
-            # This will call the tool in one shot (no visible JSON streaming)
-            planning_agent = Agent(
-                client=self.tool_executor._client,
-                agent_type=AgentType.SINGLE_HOP,
-                system_prompt=planning_prompt,
-                tools=[planning_tool],
-                use_native_tool_calling=True,
-                temperature=0.6,
+Each subtask should have:
+- id: Unique identifier (1, 2, 3, ...)
+- description: Clear, specific description
+- required_tools: Array of tool names needed
+- dependencies: Array of subtask IDs that must complete first
+- success_criteria: How to verify success"""
+
+            logger.info("Generating plan using JSON mode (direct LLM call)")
+
+            # Build messages for LLM
+            messages = []
+
+            # 1. Add system prompt FIRST
+            messages.append(Message(role=MessageRole.SYSTEM, content=planning_prompt))
+
+            # 2. Add conversation history (USER/ASSISTANT only, no SYSTEM messages to avoid conflicts)
+            conversation_history = [
+                msg
+                for msg in context.messages
+                if msg.role in (MessageRole.USER, MessageRole.ASSISTANT)
+            ]
+            messages.extend(conversation_history)
+
+            logger.info(
+                f"Calling LLM with {len(messages)} messages for planning (1 system + {len(conversation_history)} conversation)"
             )
 
-            logger.info("Generating plan using tool-based approach (hidden from user)")
-
-            # Run the planning agent - it will call the create_plan tool
-            result = await planning_agent.run(
-                user_prompt=f"Task to plan: {query}", deps=context.deps, message_history=[]
+            # 3. Call underlying provider client directly to bypass tool_registry
+            # We pass tools=None to ensure the LLM returns JSON, not tool calls
+            # (The prompt still describes available tools for planning context)
+            response = await self.tool_executor._client.client.achat(
+                messages=messages,
+                tools=None,  # Explicitly disable tools - must return JSON only
+                json_schema=PLAN_SCHEMA,
+                temperature=0.2,
             )
 
-            # Debug: Log all messages received
-            logger.info(f"Planning agent returned {len(result.messages)} messages:")
-            for i, msg in enumerate(result.messages):
-                logger.info(
-                    f"  Message {i}: role={msg.role}, has_tool_calls={bool(msg.tool_calls)}, content_length={len(msg.content) if msg.content else 0}"
-                )
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        if hasattr(tc, "function"):
-                            logger.info(f"    Tool call: {tc.function.name}")
+            # 4. Parse JSON from response
+            if not response.message.content:
+                logger.error("LLM returned empty response for planning")
+                raise ValueError("Planning LLM returned empty response")
 
-            # Extract tool call arguments (more reliable than parsing tool result strings)
-            import json
+            plan_data = json.loads(response.message.content)
 
-            plan_data = None
-
-            # First, check tool call arguments (contains the actual structured data)
-            for msg in result.messages:
-                if msg.tool_calls:
-                    for tool_call in msg.tool_calls:
-                        if (
-                            hasattr(tool_call, "function")
-                            and tool_call.function.name == "create_plan"
-                        ):
-                            args = tool_call.function.arguments
-                            if isinstance(args, str):
-                                plan_data = json.loads(args)
-                            else:
-                                plan_data = args
-                            logger.info(
-                                f"Extracted plan from tool call arguments: {len(plan_data.get('subtasks', []))} subtasks"
-                            )
-                            break
-                    if plan_data:
-                        break
-
-            # Fallback: try parsing TOOL message (less reliable due to str() conversion)
-            if not plan_data:
-                for msg in result.messages:
-                    if msg.role == MessageRole.TOOL:
-                        try:
-                            # Try JSON parsing first
-                            tool_result = (
-                                json.loads(msg.content)
-                                if isinstance(msg.content, str)
-                                else msg.content
-                            )
-                            if isinstance(tool_result, dict) and "subtasks" in tool_result:
-                                plan_data = tool_result
-                                logger.info(f"Extracted plan from TOOL message (JSON)")
-                                break
-                        except json.JSONDecodeError:
-                            # Fallback: try Python literal eval (for str(dict) format)
-                            try:
-                                import ast
-
-                                tool_result = ast.literal_eval(msg.content)
-                                if isinstance(tool_result, dict) and "subtasks" in tool_result:
-                                    plan_data = tool_result
-                                    logger.info(f"Extracted plan from TOOL message (literal_eval)")
-                                    break
-                            except:
-                                pass
-
-            if not plan_data:
-                logger.error(
-                    f"Planning tool extraction failed. Messages: {[msg.role for msg in result.messages]}"
-                )
-                raise ValueError("Planning tool was not called or returned invalid data")
+            logger.info(f"Extracted plan: {len(plan_data.get('subtasks', []))} subtasks")
+            logger.debug(f"Plan JSON: {response.message.content}")
 
             # Convert to Plan object
             subtasks = []
@@ -415,14 +370,14 @@ Call the create_plan tool with your reasoning and list of subtasks."""
             logger.info(f"Using {len(messages)} context messages")
 
         # Ensure query is in messages (it should be from enhanced_response_generator)
-        # Check if last user message matches the query
-        has_query = False
-        for msg in reversed(messages):
-            if msg.role == MessageRole.USER and msg.content == query:
-                has_query = True
-                break
+        # Only add query if no user message exists AND query is not empty
+        # Check if last message is a user message (it should be from enhanced_response_generator)
+        last_user_msg = next(
+            (msg for msg in reversed(messages) if msg.role == MessageRole.USER), None
+        )
 
-        if not has_query:
+        # Only add query if no user message exists AND query is not empty
+        if not last_user_msg and query and query.strip():
             logger.info(f"Adding query to messages: {query}")
             messages.append(Message(role=MessageRole.USER, content=query))
 

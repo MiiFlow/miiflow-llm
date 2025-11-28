@@ -14,6 +14,7 @@ from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount, UsageData
 from ..core.streaming import StreamChunk
+from ..models.anthropic import supports_structured_outputs
 from ..utils.image import data_uri_to_base64_and_mimetype
 
 logger = logging.getLogger(__name__)
@@ -21,19 +22,6 @@ logger = logging.getLogger(__name__)
 
 class AnthropicClient(ModelClient):
     """Anthropic provider client."""
-
-    # Models that support native structured outputs with output_format parameter
-    # Currently only Claude Sonnet 4.5 and Opus 4.1 support structured outputs (as of the beta release)
-    STRUCTURED_OUTPUT_MODELS = [
-        # Claude 4.5 Sonnet - SUPPORTED
-        "claude-sonnet-4-5-20250929",
-        "claude-sonnet-4.5",
-        "claude-sonnet-4-5",
-        # Claude 4.1 Opus - SUPPORTED
-        "claude-opus-4-1-20250805",
-        "claude-opus-4.1",
-        "claude-opus-4-1",
-    ]
 
     def __init__(self, model: str, api_key: Optional[str] = None, **kwargs):
         super().__init__(model=model, api_key=api_key, **kwargs)
@@ -56,9 +44,7 @@ class AnthropicClient(ModelClient):
 
     def _supports_structured_outputs(self) -> bool:
         """Check if the current model supports native structured outputs."""
-        return any(
-            supported_model in self.model for supported_model in self.STRUCTURED_OUTPUT_MODELS
-        )
+        return supports_structured_outputs(self.model)
 
     def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
         """Normalize Anthropic streaming format to unified StreamChunk."""
@@ -357,13 +343,13 @@ class AnthropicClient(ModelClient):
                             }
                         )
                     else:
+                        # Fixed: url should be a string, not a dict
                         content_list.append(
                             {
                                 "type": "document",
                                 "source": {
                                     "type": "url",
-                                    "media_type": f"application/{block.document_type}",
-                                    "data": block.document_url,
+                                    "url": block.document_url,
                                 },
                             }
                         )
@@ -429,7 +415,6 @@ class AnthropicClient(ModelClient):
                         "model": self.model,
                         "messages": anthropic_messages,
                         "temperature": temperature,
-                        "max_tokens": max_tokens or 2048,
                         "betas": ["structured-outputs-2025-11-13"],
                         "output_format": {
                             "type": "json_schema",
@@ -437,6 +422,12 @@ class AnthropicClient(ModelClient):
                         },
                         **kwargs,
                     }
+
+                    # Anthropic requires max_tokens, use 4096 as default if not specified
+                    if max_tokens is not None:
+                        request_params["max_tokens"] = max_tokens
+                    else:
+                        request_params["max_tokens"] = 4096
 
                     logger.debug(f"Using native structured output API for model {self.model}")
                 else:
@@ -459,9 +450,14 @@ class AnthropicClient(ModelClient):
                         "model": self.model,
                         "messages": anthropic_messages,
                         "temperature": temperature,
-                        "max_tokens": max_tokens or 2048,
                         **kwargs,
                     }
+
+                    # Anthropic requires max_tokens, use 4096 as default if not specified
+                    if max_tokens is not None:
+                        request_params["max_tokens"] = max_tokens
+                    else:
+                        request_params["max_tokens"] = 4096
 
                     logger.debug(f"Using tool-based JSON output for model {self.model}")
             else:
@@ -470,9 +466,14 @@ class AnthropicClient(ModelClient):
                     "model": self.model,
                     "messages": anthropic_messages,
                     "temperature": temperature,
-                    "max_tokens": max_tokens or 2048,
                     **kwargs,
                 }
+
+                # Anthropic requires max_tokens, use 4096 as default if not specified
+                if max_tokens is not None:
+                    request_params["max_tokens"] = max_tokens
+                else:
+                    request_params["max_tokens"] = 4096
 
             if system_content:
                 request_params["system"] = system_content
@@ -603,7 +604,6 @@ class AnthropicClient(ModelClient):
                         "model": self.model,
                         "messages": anthropic_messages,
                         "temperature": temperature,
-                        "max_tokens": max_tokens or 1024,
                         "stream": True,
                         "betas": ["structured-outputs-2025-11-13"],
                         "output_format": {
@@ -612,6 +612,12 @@ class AnthropicClient(ModelClient):
                         },
                         **kwargs,
                     }
+
+                    # Anthropic requires max_tokens, use 4096 as default if not specified
+                    if max_tokens is not None:
+                        request_params["max_tokens"] = max_tokens
+                    else:
+                        request_params["max_tokens"] = 4096
 
                     logger.debug(
                         f"Using native structured output API with streaming for model {self.model}"
@@ -636,10 +642,15 @@ class AnthropicClient(ModelClient):
                         "model": self.model,
                         "messages": anthropic_messages,
                         "temperature": temperature,
-                        "max_tokens": max_tokens or 1024,
                         "stream": True,
                         **kwargs,
                     }
+
+                    # Anthropic requires max_tokens, use 4096 as default if not specified
+                    if max_tokens is not None:
+                        request_params["max_tokens"] = max_tokens
+                    else:
+                        request_params["max_tokens"] = 4096
 
                     logger.debug(
                         f"Using tool-based JSON output with streaming for model {self.model}"
@@ -650,10 +661,15 @@ class AnthropicClient(ModelClient):
                     "model": self.model,
                     "messages": anthropic_messages,
                     "temperature": temperature,
-                    "max_tokens": max_tokens or 1024,
                     "stream": True,
                     **kwargs,
                 }
+
+                # Anthropic requires max_tokens, use 4096 as default if not specified
+                if max_tokens is not None:
+                    request_params["max_tokens"] = max_tokens
+                else:
+                    request_params["max_tokens"] = 4096
 
             if system_content:
                 request_params["system"] = system_content

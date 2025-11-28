@@ -18,7 +18,6 @@ def get_provider_client(
         "groq": lambda: _import_groq_client(),
         "xai": lambda: _import_xai_client(),
         "gemini": lambda: _import_gemini_client(),
-        "together": lambda: _import_together_client(),
         "openrouter": lambda: _import_openrouter_client(),
         "mistral": lambda: _import_mistral_client(),
         "ollama": lambda: _import_ollama_client(),
@@ -73,12 +72,6 @@ def _import_gemini_client():
     """Lazy import Gemini client."""
     from .gemini_client import GeminiClient
     return GeminiClient
-
-
-def _import_together_client():
-    """Lazy import TogetherAI client."""
-    from .together_client import TogetherClient
-    return TogetherClient
 
 
 def _import_openrouter_client():

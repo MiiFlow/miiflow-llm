@@ -14,7 +14,7 @@ except ImportError:
 
 from ..core.client import ModelClient
 from ..core.exceptions import AuthenticationError, ModelError, ProviderError
-from ..core.message import ImageBlock, Message, MessageRole, TextBlock
+from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount
 from ..core.streaming import StreamChunk
 from ..utils.image import image_url_to_bytes
@@ -232,6 +232,25 @@ class GeminiClient(ModelClient):
                                 # If conversion fails, add as text placeholder
                                 parts.append(
                                     {"text": f"[Image failed to load: {block.image_url}. Error: {str(e)}]"}
+                                )
+                        elif isinstance(block, DocumentBlock):
+                            # Handle document blocks: extract text and add as text content
+                            # Gemini doesn't have native document support like Anthropic,
+                            # so we extract PDF text similar to OpenAI's approach
+                            try:
+                                from ..utils.pdf_extractor import extract_pdf_text_simple
+
+                                pdf_text = extract_pdf_text_simple(block.document_url)
+
+                                filename_info = f" [{block.filename}]" if block.filename else ""
+                                pdf_content = f"[PDF Document{filename_info}]\n\n{pdf_text}"
+
+                                parts.append({"text": pdf_content})
+                            except Exception as e:
+                                # If extraction fails, add error as text placeholder
+                                filename_info = f" {block.filename}" if block.filename else ""
+                                parts.append(
+                                    {"text": f"[Error processing PDF{filename_info}: {str(e)}]"}
                                 )
 
                 # Consolidate consecutive USER messages (common pattern from LLMNode)
