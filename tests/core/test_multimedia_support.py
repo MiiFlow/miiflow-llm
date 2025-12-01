@@ -6,6 +6,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from dataclasses import asdict
 
+# Skip if fitz (PyMuPDF) is not installed
+pytest.importorskip("fitz", reason="PyMuPDF (fitz) not installed")
+
 from miiflow_llm.core.message import (
     Message,
     MessageRole,
@@ -118,7 +121,7 @@ class TestMultimediaMessages:
             }
         ]
         
-        msg = Message.from_attatchments(
+        msg = Message.from_attachments(
             text="Process these files",
             attachments=attachments
         )
@@ -172,19 +175,19 @@ class TestPDFExtraction:
                 "page_texts": ["Page 1 content", "Page 2 content", "Page 3 content"]
             }
         }
-        
+
         from miiflow_llm.utils.pdf_extractor import extract_pdf_chunks
-        
+
         result = extract_pdf_chunks(
             pdf_data="mock_pdf",
             chunk_size=20,
-            chunk_strategy="page"
+            chunk_strategy="smart"  # Now always uses smart chunking
         )
-        
+
         assert result["chunk_info"]["total_chunks"] == 3
-        assert result["chunk_info"]["chunk_strategy"] == "page"
+        assert result["chunk_info"]["chunk_strategy"] == "smart"  # Always smart now
         assert len(result["chunks"]) == 3
-        
+
         # Check chunk structure
         chunk = result["chunks"][0]
         assert "text" in chunk

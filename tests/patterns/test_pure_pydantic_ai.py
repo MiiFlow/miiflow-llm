@@ -3,6 +3,7 @@ import pytest
 import asyncio
 import os
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 from miiflow_llm import LLMClient, Agent, RunContext, FunctionTool, tool
 
@@ -19,11 +20,13 @@ class TestPurePydanticAI:
     @pytest.fixture
     def llm_client(self):
         """Mock LLM client for testing."""
-        return LLMClient.create('openai', 'gpt-3.5-turbo')
+        mock_client = MagicMock()
+        mock_client.provider_name = "openai"
+        return LLMClient(mock_client)
 
     def test_pydantic_ai_style_detection(self, llm_client):
         """Test that Pydantic AI style (ctx as first param) is detected correctly."""
-        agent = Agent(llm_client, deps_type=MockDeps)
+        agent = Agent(llm_client)
         
         @tool("search")
         async def search(ctx: RunContext[MockDeps], query: str) -> str:
@@ -46,7 +49,7 @@ class TestPurePydanticAI:
 
     def test_plain_function_detection(self, llm_client):
         """Test that plain functions (no context) are detected correctly."""
-        agent = Agent(llm_client)
+        agent = Agent(llm_client)  # No deps_type needed
         
         @tool("calculator")
         async def calculator(a: int, b: int) -> int:
@@ -84,7 +87,7 @@ class TestPurePydanticAI:
     @pytest.mark.asyncio
     async def test_pydantic_ai_execution(self, llm_client):
         """Test that Pydantic AI style tools execute correctly."""
-        agent = Agent(llm_client, deps_type=MockDeps)
+        agent = Agent(llm_client)
         
         @tool("search")
         async def search(ctx: RunContext[MockDeps], query: str) -> str:
@@ -106,9 +109,20 @@ class TestPurePydanticAI:
         print(f"✅ Pydantic AI execution: {result.output}")
 
 
+def has_api_key() -> bool:
+    """Check if any LLM API key is available."""
+    providers = ['groq', 'openai', 'anthropic']
+    for provider in providers:
+        key_name = {'groq': 'GROQ_API_KEY', 'openai': 'OPENAI_API_KEY', 'anthropic': 'ANTHROPIC_API_KEY'}.get(provider)
+        if os.getenv(key_name):
+            return True
+    return False
+
+
+@pytest.mark.skipif(not has_api_key(), reason="No API keys found - skipping real LLM tests")
 class TestRealLLMIntegration:
     """Test Pydantic AI patterns with real LLM APIs."""
-    
+
     @classmethod
     def get_available_provider(cls) -> str | None:
         """Get first available provider with API key."""
@@ -124,8 +138,7 @@ class TestRealLLMIntegration:
         """Test that LLM autonomously calls Pydantic AI style tools."""
         provider = self.get_available_provider()
         if not provider:
-            print("⚠️ No API keys found - skipping real LLM tests")
-            return
+            pytest.skip("No API keys found - skipping real LLM tests")
             
         print(f"\n🔄 Testing autonomous tool calling with {provider.upper()} API...")
         
@@ -146,7 +159,7 @@ class TestRealLLMIntegration:
                 if self.interests is None:
                     self.interests = ["AI", "machine learning"]
         
-        agent = Agent(llm_client, deps_type=UserContext, max_iterations=3)
+        agent = Agent(llm_client, max_iterations=3)
         
         # Add Pydantic AI style tools using unified approach
         @tool("get_profile")

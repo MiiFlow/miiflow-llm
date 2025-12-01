@@ -39,7 +39,7 @@ class TestToolContextInjection:
     
     def test_pydantic_ai_style_context_detection(self, llm_client):
         """Test that Pydantic AI style context is detected correctly."""
-        agent = Agent(llm_client, deps_type=MockDeps)
+        agent = Agent(llm_client)
         
         @tool("search")
         async def search(ctx: RunContext[MockDeps], query: str) -> str:
@@ -62,7 +62,7 @@ class TestToolContextInjection:
     
     def test_current_style_context_detection(self, llm_client):
         """Test that current style context is detected correctly."""
-        agent = Agent(llm_client, deps_type=MockDeps)
+        agent = Agent(llm_client)
         
         @tool("search")
         async def search(query: str, context: RunContext[MockDeps]) -> str:
@@ -104,7 +104,7 @@ class TestToolContextInjection:
     
     def test_dual_decorator_syntax(self, llm_client):
         """Test both @tool and @tool('name') syntax."""
-        agent = Agent(llm_client, deps_type=MockDeps)
+        agent = Agent(llm_client)
         
         # Style 1: @tool (Pydantic AI)
         @tool("tool1")
@@ -182,26 +182,35 @@ class TestToolContextInjection:
         print(f"✅ Keyword pattern detection works: {tool.context_injection}")
 
 
+def _has_any_api_key() -> bool:
+    """Check if any LLM API key is available."""
+    for key in ['GROQ_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY']:
+        if os.getenv(key):
+            return True
+    return False
+
+
+@pytest.mark.skipif(not _has_any_api_key(), reason="No API keys found - skipping real LLM tests")
 class TestRealLLMIntegration:
     """Test context injection with real LLM API calls."""
-    
+
     @classmethod
     def has_api_key(cls, provider: str) -> bool:
         """Check if API key is available for provider."""
         key_map = {
             'openai': 'OPENAI_API_KEY',
-            'anthropic': 'ANTHROPIC_API_KEY', 
+            'anthropic': 'ANTHROPIC_API_KEY',
             'groq': 'GROQ_API_KEY'
         }
         key_name = key_map.get(provider, '')
         key_value = os.getenv(key_name)
-        
+
         # Debug output
         print(f"Checking {provider}: {key_name} = {'***' if key_value else 'None'}")
-        
+
         return key_value is not None and key_value.strip() != ''
-    
-    @classmethod  
+
+    @classmethod
     def get_available_provider(cls) -> Optional[str]:
         """Get first available provider with API key."""
         providers = ['groq', 'openai', 'anthropic']  # Groq first (fastest/cheapest)
@@ -209,14 +218,13 @@ class TestRealLLMIntegration:
             if cls.has_api_key(provider):
                 return provider
         return None
-    
+
     @pytest.mark.asyncio
     async def test_pydantic_ai_style_real_llm_invocation(self):
         """Test Pydantic AI style tools with real LLM - autonomous tool calling."""
         provider = self.get_available_provider()
         if not provider:
-            print("⚠️ No API keys found in .env - skipping real LLM tests")
-            return
+            pytest.skip("No API keys found in .env - skipping real LLM tests")
             
         print(f"\n🔄 Testing Pydantic AI style with real {provider.upper()} API...")
         
@@ -239,7 +247,7 @@ class TestRealLLMIntegration:
                 if self.search_history is None:
                     self.search_history = ["AI", "machine learning", "python"]
         
-        agent = Agent(llm_client, deps_type=UserContext, max_iterations=5)
+        agent = Agent(llm_client, max_iterations=5)
         
         # Add Pydantic AI style tools
         @tool("search_knowledge")
@@ -302,25 +310,24 @@ class TestRealLLMIntegration:
         """Test current style tools with real LLM - autonomous tool calling."""
         provider = self.get_available_provider()
         if not provider:
-            print("⚠️ No API keys found in .env - skipping real LLM tests")
-            return
-            
+            pytest.skip("No API keys found in .env - skipping real LLM tests")
+
         print(f"\n🔄 Testing current style with real {provider.upper()} API...")
-        
-        # Create real LLM client  
+
+        # Create real LLM client
         llm_client = LLMClient.create(
             provider=provider,
             model='llama-3.1-8b-instant' if provider == 'groq' else 'gpt-3.5-turbo' if provider == 'openai' else 'claude-3-haiku-20240307'
         )
-        
+
         @dataclass
         class TaskContext:
             project_name: str = "MiiFlow AI"
             available_budget: float = 10000.0
             team_size: int = 5
             deadline: str = "2024-01-15"
-        
-        agent = Agent(llm_client, deps_type=TaskContext, max_iterations=5)
+
+        agent = Agent(llm_client, max_iterations=5)
         
         # Add current style tools (with context as keyword)
         @tool("calculate_budget")

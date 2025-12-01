@@ -2,7 +2,10 @@
 
 import asyncio
 import logging
+import os
 from typing import Dict, Any
+
+import pytest
 
 from miiflow_llm import LLMClient
 from miiflow_llm.core import Agent, AgentType
@@ -35,6 +38,13 @@ def subtract(a: float, b: float) -> Dict[str, Any]:
     return {"success": True, "result": result}
 
 
+def has_openai_key() -> bool:
+    """Check if OpenAI API key is available."""
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+@pytest.mark.skipif(not has_openai_key(), reason="OPENAI_API_KEY not set - skipping real LLM tests")
+@pytest.mark.asyncio
 async def test_native_react():
     """Test ReAct agent with native tool calling."""
 
