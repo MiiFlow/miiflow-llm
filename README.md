@@ -340,7 +340,30 @@ except ProviderError as e:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+We welcome contributions! Here's how to get started:
+
+```bash
+# Clone and install
+git clone https://github.com/Miiflow/miiflow-llm.git
+cd miiflow-llm
+pip install -e ".[all]"
+
+# Run tests
+pytest tests/
+
+# Format code
+black miiflow_llm/ tests/
+isort miiflow_llm/ tests/
+```
+
+### Ways to Contribute
+- **Report bugs** — Open an issue with reproduction steps
+- **Request features** — Describe your use case
+- **Add providers** — See [CONTRIBUTING.md](CONTRIBUTING.md) for the provider guide
+- **Improve docs** — Fix typos, add examples
+- **Write tests** — Increase coverage
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 ## License
 
