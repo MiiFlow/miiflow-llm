@@ -75,7 +75,6 @@ class TestReActOrchestratorSetup:
             max_steps=10,
             max_budget=None,
             max_time_seconds=None,
-            use_native_tools=False,
         )
 
     def test_orchestrator_creation(self, orchestrator):
@@ -84,15 +83,6 @@ class TestReActOrchestratorSetup:
         assert orchestrator.event_bus is not None
         assert orchestrator.safety_manager is not None
         assert orchestrator.parser is not None
-        assert orchestrator.use_native_tools is False
-
-    def test_orchestrator_native_mode(self, mock_agent):
-        """Test orchestrator in native tool calling mode."""
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            use_native_tools=True,
-        )
-        assert orchestrator.use_native_tools is True
 
     def test_context_setup_with_empty_query(self, orchestrator):
         """Test that empty query raises error when no user message exists."""
@@ -119,246 +109,6 @@ class TestReActOrchestratorSetup:
         assert len(context.messages) >= 2
         system_msgs = [m for m in context.messages if m.role == MessageRole.SYSTEM]
         assert len(system_msgs) >= 1
-
-
-class TestReActOrchestratorExecution:
-    """Test ReAct orchestrator execution flow."""
-
-    def _create_mock_agent_with_streaming(self, responses: List[str]):
-        """Helper to create a properly mocked Agent with streaming LLMClient.
-
-        The ReAct orchestrator uses streaming via tool_executor.stream_without_tools(),
-        which internally calls self._client.astream_chat(). So we need to mock
-        astream_chat to return async generators that yield StreamChunk objects.
-        """
-        from miiflow_llm.core.client import StreamChunk
-
-        # Create mock model client (the underlying provider client)
-        mock_model_client = MagicMock()
-        mock_model_client.provider_name = "openai"
-        mock_model_client.convert_schema_to_provider_format = MagicMock(side_effect=lambda x: x)
-
-        # Create async generator factory for streaming responses
-        async def create_stream_generator(response_text):
-            """Create an async generator that yields chunks for a response."""
-            # Yield the response in chunks (simulate streaming)
-            chunk_size = 50  # characters per chunk
-            for i in range(0, len(response_text), chunk_size):
-                chunk_text = response_text[i:i + chunk_size]
-                chunk = StreamChunk(
-                    content=response_text[:i + chunk_size],
-                    delta=chunk_text,
-                    finish_reason=None,
-                    usage=None,
-                    tool_calls=None,
-                )
-                yield chunk
-
-            # Final chunk with finish_reason
-            final_chunk = StreamChunk(
-                content=response_text,
-                delta="",
-                finish_reason="stop",
-                usage=MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30),
-                tool_calls=None,
-            )
-            yield final_chunk
-
-        # Create response generators - copy each time to avoid exhaustion
-        response_list = list(responses)
-        response_index = [0]  # Use list to allow mutation in closure
-
-        async def mock_astream_chat(*args, **kwargs):
-            """Mock async stream chat that returns next response generator."""
-            if response_index[0] < len(response_list):
-                response_text = response_list[response_index[0]]
-                response_index[0] += 1
-                async for chunk in create_stream_generator(response_text):
-                    yield chunk
-
-        mock_model_client.astream_chat = mock_astream_chat
-
-        # Create mock LLMClient
-        mock_llm_client = MagicMock()
-        mock_llm_client.client = mock_model_client
-        mock_llm_client._client = mock_model_client
-        mock_llm_client.astream_chat = mock_astream_chat
-        mock_llm_client.tool_registry = ToolRegistry()
-
-        # Create the agent
-        agent = MagicMock()
-        agent.client = mock_llm_client
-        agent.tool_registry = mock_llm_client.tool_registry
-        agent.temperature = 0.7
-        agent.max_tokens = None
-        agent._tools = []
-
-        return agent
-
-    @pytest.mark.asyncio
-    async def test_single_step_direct_answer(self):
-        """Test agent provides answer without using tools."""
-        response_text = """<thinking>Simple question, direct answer.</thinking>
-
-<answer>The answer is 42.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([response_text])
-
-        # Create orchestrator
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        context = RunContext(deps=None, messages=[])
-        result = await orchestrator.execute("What is the meaning of life?", context)
-
-        assert isinstance(result, ReActResult)
-        assert result.final_answer == "The answer is 42."
-        assert result.stop_reason == StopReason.ANSWER_COMPLETE
-        assert result.steps_count >= 1
-
-    @pytest.mark.asyncio
-    async def test_multi_step_tool_usage(self):
-        """Test thought → action → observation → answer flow."""
-        # First response: tool call (using correct XML format)
-        first_response = """<thinking>I need to calculate.</thinking>
-
-<tool_call name="add">{"a": 2, "b": 2}</tool_call>"""
-
-        # Second response: final answer after observation
-        second_response = """<thinking>Got the result, now I can answer.</thinking>
-
-<answer>2 + 2 equals 4.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([first_response, second_response])
-
-        @tool("add", "Add two numbers")
-        def add(a: int, b: int) -> int:
-            return a + b
-
-        mock_agent.tool_registry.register(add)
-
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        context = RunContext(deps=None, messages=[])
-        result = await orchestrator.execute("What is 2 + 2?", context)
-
-        assert isinstance(result, ReActResult)
-        assert "4" in result.final_answer
-        assert result.stop_reason == StopReason.ANSWER_COMPLETE
-        # Should have at least 2 steps: tool call + answer
-        assert result.steps_count >= 1
-
-    @pytest.mark.asyncio
-    async def test_max_iterations_stop(self):
-        """Test stop condition: max steps reached or forced stop due to continuous tool calls."""
-        # Always return a tool call (never answer) - using correct XML format
-        tool_response = """<thinking>Let me try again.</thinking>
-
-<tool_call name="search">{"query": "test"}</tool_call>"""
-
-        # Provide enough responses for many iterations
-        mock_agent = self._create_mock_agent_with_streaming([tool_response] * 10)
-
-        @tool("search", "Search for something")
-        def search(query: str) -> str:
-            return f"Results for: {query}"
-
-        mock_agent.tool_registry.register(search)
-
-        # Set max_steps to 3
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=3,
-            use_native_tools=False,
-        )
-
-        context = RunContext(deps=None, messages=[])
-        result = await orchestrator.execute("Keep searching", context)
-
-        # Should stop due to either max steps or forced stop
-        # (the orchestrator may force stop when no answer is provided)
-        assert result.stop_reason in [StopReason.MAX_STEPS, StopReason.FORCED_STOP]
-        assert result.steps_count <= 3
-        # The tool was being called, so there should be action steps
-        assert result.action_steps_count >= 1
-
-    @pytest.mark.asyncio
-    async def test_tool_execution_error_recovery(self):
-        """Test graceful handling of tool failures."""
-        # First response: tool call (using correct XML format)
-        tool_call_response = """<thinking>Let me use the tool.</thinking>
-
-<tool_call name="failing_tool">{}</tool_call>"""
-
-        # Second response after error: provide answer
-        answer_response = """<thinking>The tool failed, I'll answer based on what I know.</thinking>
-
-<answer>I encountered an error but here's my best answer.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([tool_call_response, answer_response])
-
-        @tool("failing_tool", "A tool that always fails")
-        def failing_tool() -> str:
-            raise RuntimeError("Tool execution failed!")
-
-        mock_agent.tool_registry.register(failing_tool)
-
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        context = RunContext(deps=None, messages=[])
-        result = await orchestrator.execute("Use the tool", context)
-
-        # Should complete despite error
-        assert result.final_answer is not None
-        assert result.stop_reason == StopReason.ANSWER_COMPLETE
-
-    @pytest.mark.asyncio
-    async def test_context_injection_in_tools(self):
-        """Test RunContext passed to tools correctly."""
-        # Response that calls the context-aware tool (using correct XML format)
-        tool_call_response = """<thinking>Let me get the user info.</thinking>
-
-<tool_call name="get_user_info">{}</tool_call>"""
-
-        answer_response = """<thinking>Got the user info.</thinking>
-
-<answer>Your user ID is test_user_123.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([tool_call_response, answer_response])
-
-        context_captured = []
-
-        @tool("get_user_info", "Get current user info")
-        def get_user_info(ctx: RunContext[MockDeps]) -> str:
-            context_captured.append(ctx)
-            return f"User ID: {ctx.deps.user_id}"
-
-        mock_agent.tool_registry.register(get_user_info)
-
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        deps = MockDeps(user_id="test_user_123")
-        context = RunContext(deps=deps, messages=[])
-        result = await orchestrator.execute("Who am I?", context)
-
-        # Verify context was passed to tool
-        assert len(context_captured) >= 1
-        assert context_captured[0].deps.user_id == "test_user_123"
 
 
 class TestReActOrchestratorSafetyConditions:
@@ -548,7 +298,7 @@ Let me think about this problem.
 
 
 class TestNativeToolCallingMode:
-    """Test ReAct orchestrator with native tool calling (use_native_tools=True)."""
+    """Test ReAct orchestrator with native tool calling."""
 
     def _create_mock_agent_with_native_tools(self, responses: List[dict]):
         """Helper to create a mock agent for native tool calling mode.
@@ -631,7 +381,6 @@ class TestNativeToolCallingMode:
         orchestrator = ReActFactory.create_orchestrator(
             agent=mock_agent,
             max_steps=5,
-            use_native_tools=True,
         )
 
         context = RunContext(deps=None, messages=[])
@@ -676,7 +425,6 @@ class TestNativeToolCallingMode:
         orchestrator = ReActFactory.create_orchestrator(
             agent=mock_agent,
             max_steps=5,
-            use_native_tools=True,
         )
 
         context = RunContext(deps=None, messages=[])
@@ -915,131 +663,6 @@ class TestResultBuilding:
         assert "No reasoning steps" in fallback
 
 
-class TestErrorHandlingPaths:
-    """Test error handling in orchestrator."""
-
-    def _create_mock_agent_with_streaming(self, responses: List[str]):
-        """Helper to create agent with streaming mock."""
-        from miiflow_llm.core.client import StreamChunk
-
-        mock_model_client = MagicMock()
-        mock_model_client.provider_name = "openai"
-        mock_model_client.convert_schema_to_provider_format = MagicMock(side_effect=lambda x: x)
-
-        response_list = list(responses)
-        response_index = [0]
-
-        async def create_stream_generator(response_text):
-            chunk_size = 50
-            for i in range(0, len(response_text), chunk_size):
-                chunk_text = response_text[i:i + chunk_size]
-                chunk = StreamChunk(
-                    content=response_text[:i + chunk_size],
-                    delta=chunk_text,
-                    finish_reason=None,
-                    usage=None,
-                    tool_calls=None,
-                )
-                yield chunk
-
-            final_chunk = StreamChunk(
-                content=response_text,
-                delta="",
-                finish_reason="stop",
-                usage=MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30),
-                tool_calls=None,
-            )
-            yield final_chunk
-
-        async def mock_astream_chat(*args, **kwargs):
-            if response_index[0] < len(response_list):
-                response_text = response_list[response_index[0]]
-                response_index[0] += 1
-                async for chunk in create_stream_generator(response_text):
-                    yield chunk
-
-        mock_model_client.astream_chat = mock_astream_chat
-
-        mock_llm_client = MagicMock()
-        mock_llm_client.client = mock_model_client
-        mock_llm_client._client = mock_model_client
-        mock_llm_client.astream_chat = mock_astream_chat
-        mock_llm_client.tool_registry = ToolRegistry()
-
-        agent = MagicMock()
-        agent.client = mock_llm_client
-        agent.tool_registry = mock_llm_client.tool_registry
-        agent.temperature = 0.7
-        agent.max_tokens = None
-        agent._tools = []
-
-        return agent
-
-    @pytest.mark.asyncio
-    async def test_tool_not_found_with_fuzzy_correction(self):
-        """Test that tool not found triggers fuzzy matching."""
-        # LLM requests "Add" but actual tool is "Addition"
-        response = """<thinking>Let me add the numbers.</thinking>
-
-<tool_call name="Add">{"a": 2, "b": 3}</tool_call>"""
-
-        answer_response = """<thinking>Got the result.</thinking>
-
-<answer>2 + 3 equals 5.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([response, answer_response])
-
-        @tool("Addition", "Add two numbers")
-        def addition(a: int, b: int) -> int:
-            return a + b
-
-        mock_agent.tool_registry.register(addition)
-
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        context = RunContext(deps=None, messages=[])
-        result = await orchestrator.execute("What is 2 + 3?", context)
-
-        # Should still complete because of fuzzy matching
-        assert result.final_answer is not None
-
-    @pytest.mark.asyncio
-    async def test_handles_malformed_tool_input(self):
-        """Test graceful handling of malformed tool input."""
-        # Tool call with invalid JSON
-        response = """<thinking>Using tool.</thinking>
-
-<tool_call name="search">not valid json</tool_call>"""
-
-        answer_response = """<thinking>I'll provide an answer anyway.</thinking>
-
-<answer>Here's what I found.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([response, answer_response])
-
-        @tool("search", "Search for something")
-        def search(query: str) -> str:
-            return f"Results: {query}"
-
-        mock_agent.tool_registry.register(search)
-
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        context = RunContext(deps=None, messages=[])
-        result = await orchestrator.execute("Search for something", context)
-
-        # Should not crash, should complete
-        assert result is not None
-
-
 class TestSanitizeErrorMessage:
     """Test error message sanitization."""
 
@@ -1079,100 +702,6 @@ ValueError: The actual error"""
         result = _sanitize_error_message(simple_error)
 
         assert result == simple_error
-
-
-class TestEventStreamingIntegration:
-    """Test event streaming during orchestrator execution."""
-
-    def _create_mock_agent_with_streaming(self, responses: List[str]):
-        """Helper to create agent with streaming mock."""
-        from miiflow_llm.core.client import StreamChunk
-
-        mock_model_client = MagicMock()
-        mock_model_client.provider_name = "openai"
-        mock_model_client.convert_schema_to_provider_format = MagicMock(side_effect=lambda x: x)
-
-        response_list = list(responses)
-        response_index = [0]
-
-        async def create_stream_generator(response_text):
-            chunk_size = 50
-            for i in range(0, len(response_text), chunk_size):
-                chunk_text = response_text[i:i + chunk_size]
-                chunk = StreamChunk(
-                    content=response_text[:i + chunk_size],
-                    delta=chunk_text,
-                    finish_reason=None,
-                    usage=None,
-                    tool_calls=None,
-                )
-                yield chunk
-
-            final_chunk = StreamChunk(
-                content=response_text,
-                delta="",
-                finish_reason="stop",
-                usage=MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30),
-                tool_calls=None,
-            )
-            yield final_chunk
-
-        async def mock_astream_chat(*args, **kwargs):
-            if response_index[0] < len(response_list):
-                response_text = response_list[response_index[0]]
-                response_index[0] += 1
-                async for chunk in create_stream_generator(response_text):
-                    yield chunk
-
-        mock_model_client.astream_chat = mock_astream_chat
-
-        mock_llm_client = MagicMock()
-        mock_llm_client.client = mock_model_client
-        mock_llm_client._client = mock_model_client
-        mock_llm_client.astream_chat = mock_astream_chat
-        mock_llm_client.tool_registry = ToolRegistry()
-
-        agent = MagicMock()
-        agent.client = mock_llm_client
-        agent.tool_registry = mock_llm_client.tool_registry
-        agent.temperature = 0.7
-        agent.max_tokens = None
-        agent._tools = []
-
-        return agent
-
-    @pytest.mark.asyncio
-    async def test_events_published_during_execution(self):
-        """Test that events are published during execution."""
-        response = """<thinking>Let me think about this.</thinking>
-
-<answer>The answer is 42.</answer>"""
-
-        mock_agent = self._create_mock_agent_with_streaming([response])
-
-        orchestrator = ReActFactory.create_orchestrator(
-            agent=mock_agent,
-            max_steps=5,
-            use_native_tools=False,
-        )
-
-        # Collect events
-        events_received = []
-
-        def event_handler(event):
-            events_received.append(event)
-
-        orchestrator.event_bus.subscribe(event_handler)
-
-        context = RunContext(deps=None, messages=[])
-        await orchestrator.execute("What is the answer?", context)
-
-        # Should have received events
-        assert len(events_received) > 0
-
-        # Should have step_start event
-        event_types = [e.event_type for e in events_received]
-        assert ReActEventType.STEP_START in event_types
 
 
 # Import the sanitize function for testing

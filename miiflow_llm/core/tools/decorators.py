@@ -100,7 +100,8 @@ def tool(
                             description=param_info.get('description', ''),
                             required=param_name in schema_dict['parameters'].get('required', []),
                             default=param_info.get('default'),
-                            enum=param_info.get('enum')
+                            enum=param_info.get('enum'),
+                            items=param_info.get('items')  # Propagate items for array types
                         )
                 logger.debug(f"Generated schema via reflection for {tool_name} with {len(param_schemas)} parameters")
             except Exception as e:

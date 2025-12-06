@@ -5,8 +5,12 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 try:
     import google.generativeai as genai
-    from google.generativeai.types import HarmBlockThreshold, HarmCategory
-    from google.generativeai.types import FunctionDeclaration, Tool
+    from google.generativeai.types import (
+        FunctionDeclaration,
+        HarmBlockThreshold,
+        HarmCategory,
+        Tool,
+    )
 
     GEMINI_AVAILABLE = True
 except ImportError:
@@ -37,18 +41,14 @@ class GeminiClient(ModelClient):
             )
 
         super().__init__(
-            model=model,
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=max_retries,
-            **kwargs
+            model=model, api_key=api_key, timeout=timeout, max_retries=max_retries, **kwargs
         )
 
         if not api_key:
             raise AuthenticationError("Gemini API key is required")
 
         # Configure Gemini with REST transport (avoids gRPC connection issues)
-        genai.configure(api_key=api_key, transport='rest')
+        genai.configure(api_key=api_key, transport="rest")
 
         # Initialize the model
         try:
@@ -72,6 +72,23 @@ class GeminiClient(ModelClient):
         """Reset streaming state for a new streaming session."""
         self._accumulated_content = ""
 
+    def _get_finish_reason_name(self, finish_reason: Any) -> Optional[str]:
+        """Safely extract finish_reason name, handling both enum and int values.
+
+        Gemini 2.5 models may return new undocumented finish_reason enum values
+        (like 12) that come as raw integers instead of enum objects.
+        """
+        if finish_reason is None:
+            return None
+        # If it's an enum with a name attribute, use that
+        if hasattr(finish_reason, "name"):
+            return finish_reason.name
+        # If it's an integer (unrecognized enum value), convert to string
+        if isinstance(finish_reason, int):
+            return f"UNKNOWN_{finish_reason}"
+        # Fallback: convert to string
+        return str(finish_reason)
+
     def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
         """Normalize Gemini streaming format to unified StreamChunk."""
         content = ""
@@ -80,25 +97,26 @@ class GeminiClient(ModelClient):
         usage = None
 
         try:
-            if hasattr(chunk, 'candidates') and chunk.candidates:
+            if hasattr(chunk, "candidates") and chunk.candidates:
                 candidate = chunk.candidates[0]
 
-                if hasattr(candidate, 'content') and candidate.content.parts:
+                if hasattr(candidate, "content") and candidate.content.parts:
                     delta = candidate.content.parts[0].text
                     content = delta
 
-                if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                    finish_reason = candidate.finish_reason.name
+                if hasattr(candidate, "finish_reason") and candidate.finish_reason:
+                    finish_reason = self._get_finish_reason_name(candidate.finish_reason)
 
-            if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                 usage = TokenCount(
-                    prompt_tokens=getattr(chunk.usage_metadata, 'prompt_token_count', 0) or 0,
-                    completion_tokens=getattr(chunk.usage_metadata, 'candidates_token_count', 0) or 0,
-                    total_tokens=getattr(chunk.usage_metadata, 'total_token_count', 0) or 0
+                    prompt_tokens=getattr(chunk.usage_metadata, "prompt_token_count", 0) or 0,
+                    completion_tokens=getattr(chunk.usage_metadata, "candidates_token_count", 0)
+                    or 0,
+                    total_tokens=getattr(chunk.usage_metadata, "total_token_count", 0) or 0,
                 )
 
         except AttributeError:
-            if hasattr(chunk, 'text'):
+            if hasattr(chunk, "text"):
                 content = chunk.text
                 delta = content
             else:
@@ -106,19 +124,17 @@ class GeminiClient(ModelClient):
                 delta = content
 
         return StreamChunk(
-            content=content,
-            delta=delta,
-            finish_reason=finish_reason,
-            usage=usage,
-            tool_calls=None
+            content=content, delta=delta, finish_reason=finish_reason, usage=usage, tool_calls=None
         )
 
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to Gemini format."""
+        # Normalize parameters to remove unsupported fields (default, additionalProperties, etc.)
+        normalized_parameters = self._normalize_schema_for_gemini(schema["parameters"])
         return {
             "name": schema["name"],
             "description": schema["description"],
-            "parameters": schema["parameters"],
+            "parameters": normalized_parameters,
         }
 
     def _normalize_schema_for_gemini(self, schema: Dict[str, Any]) -> Dict[str, Any]:
@@ -138,7 +154,7 @@ class GeminiClient(ModelClient):
         normalized = {}
 
         # Fields that Gemini doesn't support
-        unsupported_fields = ["additionalProperties", "$schema", "definitions", "$defs"]
+        unsupported_fields = ["additionalProperties", "$schema", "definitions", "$defs", "default"]
 
         for key, value in schema.items():
             # Skip unsupported fields
@@ -189,6 +205,26 @@ class GeminiClient(ModelClient):
 
         return normalized
 
+    def _extract_system_instruction(self, messages: List[Message]) -> Optional[str]:
+        """Extract system instruction from messages.
+
+        Gemini supports system instructions via the system_instruction parameter.
+        This extracts and combines all system messages into a single instruction.
+        """
+        system_parts = []
+        for message in messages:
+            if message.role == MessageRole.SYSTEM:
+                if isinstance(message.content, str):
+                    system_parts.append(message.content)
+                elif isinstance(message.content, list):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            system_parts.append(block.text)
+
+        if system_parts:
+            return "\n\n".join(system_parts)
+        return None
+
     async def _convert_messages_to_gemini_format(
         self, messages: List[Message]
     ) -> List[Dict[str, Any]]:
@@ -196,19 +232,16 @@ class GeminiClient(ModelClient):
 
         Consolidates consecutive USER messages into a single message, ensuring images
         come before text (as required by Gemini API).
+
+        Note: System messages are handled separately via _extract_system_instruction()
+        and passed to the model via the system_instruction parameter.
         """
         gemini_messages = []
 
         for message in messages:
+            # Skip system messages - they're handled via system_instruction parameter
             if message.role == MessageRole.SYSTEM:
-                if gemini_messages and gemini_messages[-1]["role"] == "user":
-                    gemini_messages[-1]["parts"][0][
-                        "text"
-                    ] = f"System: {message.content}\n\n{gemini_messages[-1]['parts'][0]['text']}"
-                else:
-                    gemini_messages.append(
-                        {"role": "user", "parts": [{"text": f"System: {message.content}"}]}
-                    )
+                continue
             elif message.role == MessageRole.USER:
                 parts = []
 
@@ -231,7 +264,9 @@ class GeminiClient(ModelClient):
                             except Exception as e:
                                 # If conversion fails, add as text placeholder
                                 parts.append(
-                                    {"text": f"[Image failed to load: {block.image_url}. Error: {str(e)}]"}
+                                    {
+                                        "text": f"[Image failed to load: {block.image_url}. Error: {str(e)}]"
+                                    }
                                 )
                         elif isinstance(block, DocumentBlock):
                             # Handle document blocks: extract text and add as text content
@@ -272,7 +307,118 @@ class GeminiClient(ModelClient):
                     gemini_messages.append({"role": "user", "parts": parts})
 
             elif message.role == MessageRole.ASSISTANT:
-                gemini_messages.append({"role": "model", "parts": [{"text": message.content}]})
+                parts = []
+
+                # Add text content if present
+                if message.content:
+                    if isinstance(message.content, str):
+                        parts.append({"text": message.content})
+                    elif isinstance(message.content, list):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                parts.append({"text": block.text})
+
+                # Add function calls if present (for multi-turn with tool use)
+                if message.tool_calls:
+                    for tool_call in message.tool_calls:
+                        # Handle both dict format and object format
+                        if isinstance(tool_call, dict):
+                            func_name = tool_call.get("function", {}).get("name") or tool_call.get(
+                                "name"
+                            )
+                            func_args = tool_call.get("function", {}).get(
+                                "arguments"
+                            ) or tool_call.get("arguments", {})
+                            # Parse arguments if they're a string
+                            if isinstance(func_args, str):
+                                import json
+
+                                try:
+                                    func_args = json.loads(func_args)
+                                except json.JSONDecodeError:
+                                    func_args = {}
+                        else:
+                            # Object with attributes
+                            func_name = getattr(tool_call, "name", None) or getattr(
+                                getattr(tool_call, "function", None), "name", None
+                            )
+                            func_args = getattr(tool_call, "arguments", {}) or getattr(
+                                getattr(tool_call, "function", None), "arguments", {}
+                            )
+
+                        if func_name:
+                            parts.append(
+                                {
+                                    "function_call": {
+                                        "name": func_name,
+                                        "args": func_args if isinstance(func_args, dict) else {},
+                                    }
+                                }
+                            )
+
+                # Only add if we have parts
+                if parts:
+                    gemini_messages.append({"role": "model", "parts": parts})
+                elif not message.content and not message.tool_calls:
+                    # Empty assistant message - add placeholder
+                    gemini_messages.append({"role": "model", "parts": [{"text": ""}]})
+
+            elif message.role == MessageRole.TOOL:
+                # Tool results need to be sent as function_response with role "user"
+                # Extract tool name from tool_call_id or use a default
+                tool_name = getattr(message, "name", None) or "tool_result"
+
+                # Parse the content as the result
+                result_content = (
+                    message.content if isinstance(message.content, str) else str(message.content)
+                )
+
+                # Gemini expects function responses as user messages with function_response parts
+                # Check if last message was also a tool response - consolidate them
+                if gemini_messages and gemini_messages[-1]["role"] == "user":
+                    # Check if it contains function_response parts
+                    has_function_response = any(
+                        "function_response" in p for p in gemini_messages[-1]["parts"]
+                    )
+                    if has_function_response:
+                        # Add to existing function response message
+                        gemini_messages[-1]["parts"].append(
+                            {
+                                "function_response": {
+                                    "name": tool_name,
+                                    "response": {"result": result_content},
+                                }
+                            }
+                        )
+                    else:
+                        # New message for function response
+                        gemini_messages.append(
+                            {
+                                "role": "user",
+                                "parts": [
+                                    {
+                                        "function_response": {
+                                            "name": tool_name,
+                                            "response": {"result": result_content},
+                                        }
+                                    }
+                                ],
+                            }
+                        )
+                else:
+                    gemini_messages.append(
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "function_response": {
+                                        "name": tool_name,
+                                        "response": {"result": result_content},
+                                    }
+                                }
+                            ],
+                        }
+                    )
 
         return gemini_messages
 
@@ -287,6 +433,10 @@ class GeminiClient(ModelClient):
     ):
         """Send chat completion request to Gemini."""
         try:
+            # Extract system instruction from messages
+            system_instruction = self._extract_system_instruction(messages)
+
+            # Convert remaining messages to Gemini format
             gemini_messages = await self._convert_messages_to_gemini_format(messages)
 
             # Determine if we have multimodal content
@@ -300,23 +450,27 @@ class GeminiClient(ModelClient):
                     break
 
             # Prepare content for API call
-            if len(gemini_messages) == 1 and not has_multimodal:
-                # Simple single message with text only
-                prompt = gemini_messages[0]["parts"][0]["text"]
-            elif len(gemini_messages) == 1 and has_multimodal:
-                # Single message with multimodal content - pass parts directly
-                prompt = gemini_messages[0]["parts"]
+            # Gemini's generate_content supports multi-turn by passing list of messages
+            # with 'role' ('user' or 'model') and 'parts' keys
+            if len(gemini_messages) == 0:
+                raise ProviderError(
+                    "No user or assistant messages provided to Gemini", provider="gemini"
+                )
+            elif len(gemini_messages) == 1:
+                # Single message - can pass just the parts for simplicity
+                parts = gemini_messages[0]["parts"]
+                if has_multimodal:
+                    prompt = parts
+                elif len(parts) == 1:
+                    # Single text part - can pass as string
+                    prompt = parts[0]["text"]
+                else:
+                    # Multiple text parts - join them together
+                    prompt = "\n\n".join(p["text"] for p in parts if "text" in p)
             else:
-                # Multiple messages - use chat interface for multi-turn conversations
-                # For now, flatten to text (TODO: use proper chat API for multi-turn)
-                prompt_parts = []
-                for msg in gemini_messages:
-                    role = "Human" if msg["role"] == "user" else "Assistant"
-                    # Extract text from parts
-                    text_parts = [p.get("text", "[non-text content]") for p in msg["parts"]]
-                    text = " ".join(text_parts)
-                    prompt_parts.append(f"{role}: {text}")
-                prompt = "\n\n".join(prompt_parts)
+                # Multiple messages - pass as list for proper multi-turn conversation
+                # Gemini expects: [{'role': 'user'|'model', 'parts': [...]}]
+                prompt = gemini_messages
 
             # Build generation config
             generation_config_params = {
@@ -344,20 +498,30 @@ class GeminiClient(ModelClient):
             gemini_tools = None
             if tools:
                 # Gemini expects tools wrapped in a Tool object
-                
+
                 function_declarations = []
                 for tool in tools:
                     func_decl = FunctionDeclaration(
                         name=tool["name"],
                         description=tool["description"],
-                        parameters=tool["parameters"]
+                        parameters=tool["parameters"],
                     )
                     function_declarations.append(func_decl)
 
                 gemini_tools = [Tool(function_declarations=function_declarations)]
 
+            # Create model with system instruction if provided
+            # Gemini requires system_instruction to be set at model creation time
+            if system_instruction:
+                model = genai.GenerativeModel(
+                    model_name=self.model,
+                    system_instruction=system_instruction,
+                )
+            else:
+                model = self.client
+
             response = await asyncio.to_thread(
-                self.client.generate_content,
+                model.generate_content,
                 prompt,
                 generation_config=generation_config,
                 safety_settings=self.safety_settings,
@@ -369,14 +533,14 @@ class GeminiClient(ModelClient):
 
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
+                    if hasattr(part, "function_call") and part.function_call:
                         func_call = part.function_call
                         tool_call = {
                             "name": func_call.name,
-                            "arguments": dict(func_call.args) if func_call.args else {}
+                            "arguments": dict(func_call.args) if func_call.args else {},
                         }
                         tool_calls.append(tool_call)
-                    elif hasattr(part, 'text') and part.text:
+                    elif hasattr(part, "text") and part.text:
                         content += part.text
 
             usage = TokenCount()
@@ -390,7 +554,7 @@ class GeminiClient(ModelClient):
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content,
-                tool_calls=tool_calls if tool_calls else None
+                tool_calls=tool_calls if tool_calls else None,
             )
 
             from ..core.client import ChatResponse
@@ -401,7 +565,9 @@ class GeminiClient(ModelClient):
                 model=self.model,
                 provider=self.provider_name,
                 finish_reason=(
-                    response.candidates[0].finish_reason.name if response.candidates else None
+                    self._get_finish_reason_name(response.candidates[0].finish_reason)
+                    if response.candidates
+                    else None
                 ),
             )
 
@@ -419,6 +585,10 @@ class GeminiClient(ModelClient):
     ) -> AsyncIterator:
         """Send streaming chat completion request to Gemini."""
         try:
+            # Extract system instruction from messages
+            system_instruction = self._extract_system_instruction(messages)
+
+            # Convert remaining messages to Gemini format
             gemini_messages = await self._convert_messages_to_gemini_format(messages)
 
             # Determine if we have multimodal content
@@ -432,23 +602,27 @@ class GeminiClient(ModelClient):
                     break
 
             # Prepare content for API call
-            if len(gemini_messages) == 1 and not has_multimodal:
-                # Simple single message with text only
-                prompt = gemini_messages[0]["parts"][0]["text"]
-            elif len(gemini_messages) == 1 and has_multimodal:
-                # Single message with multimodal content - pass parts directly
-                prompt = gemini_messages[0]["parts"]
+            # Gemini's generate_content supports multi-turn by passing list of messages
+            # with 'role' ('user' or 'model') and 'parts' keys
+            if len(gemini_messages) == 0:
+                raise ProviderError(
+                    "No user or assistant messages provided to Gemini", provider="gemini"
+                )
+            elif len(gemini_messages) == 1:
+                # Single message - can pass just the parts for simplicity
+                parts = gemini_messages[0]["parts"]
+                if has_multimodal:
+                    prompt = parts
+                elif len(parts) == 1:
+                    # Single text part - can pass as string
+                    prompt = parts[0]["text"]
+                else:
+                    # Multiple text parts - join them together
+                    prompt = "\n\n".join(p["text"] for p in parts if "text" in p)
             else:
-                # Multiple messages - use chat interface for multi-turn conversations
-                # For now, flatten to text (TODO: use proper chat API for multi-turn)
-                prompt_parts = []
-                for msg in gemini_messages:
-                    role = "Human" if msg["role"] == "user" else "Assistant"
-                    # Extract text from parts
-                    text_parts = [p.get("text", "[non-text content]") for p in msg["parts"]]
-                    text = " ".join(text_parts)
-                    prompt_parts.append(f"{role}: {text}")
-                prompt = "\n\n".join(prompt_parts)
+                # Multiple messages - pass as list for proper multi-turn conversation
+                # Gemini expects: [{'role': 'user'|'model', 'parts': [...]}]
+                prompt = gemini_messages
 
             # Build generation config
             generation_config_params = {
@@ -470,8 +644,18 @@ class GeminiClient(ModelClient):
 
             generation_config = genai.GenerationConfig(**generation_config_params)
 
+            # Create model with system instruction if provided
+            # Gemini requires system_instruction to be set at model creation time
+            if system_instruction:
+                model = genai.GenerativeModel(
+                    model_name=self.model,
+                    system_instruction=system_instruction,
+                )
+            else:
+                model = self.client
+
             response_stream = await asyncio.to_thread(
-                self.client.generate_content,
+                model.generate_content,
                 prompt,
                 generation_config=generation_config,
                 safety_settings=self.safety_settings,
@@ -493,14 +677,3 @@ class GeminiClient(ModelClient):
 
         except Exception as e:
             raise ProviderError(f"Gemini streaming error: {e}", provider="gemini")
-
-
-# Available Gemini models (updated for current API)
-GEMINI_MODELS = {
-    "gemini-1.5-pro": "gemini-1.5-pro",
-    "gemini-1.5-pro-latest": "gemini-1.5-pro-latest",
-    "gemini-1.5-flash": "gemini-1.5-flash",
-    "gemini-1.5-flash-latest": "gemini-1.5-flash-latest",
-    "gemini-1.5-flash-8b": "gemini-1.5-flash-8b",
-    # Note: gemini-pro is deprecated, use gemini-1.5-pro instead
-}

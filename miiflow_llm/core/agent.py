@@ -305,6 +305,15 @@ class Agent(Generic[Deps, Result]):
         """
         effective_type = agent_type or self.agent_type
 
+        # Ensure context has the query as a USER message (similar to run())
+        # This is needed for orchestrators that expect the query in context.messages
+        has_user_message = any(
+            msg.role == MessageRole.USER and msg.content == query
+            for msg in context.messages
+        )
+        if not has_user_message and query and query.strip():
+            context.messages.append(Message(role=MessageRole.USER, content=query))
+
         if effective_type == AgentType.SINGLE_HOP:
             async for event in self._stream_single_hop(query, context=context):
                 yield event
@@ -337,7 +346,6 @@ class Agent(Generic[Deps, Result]):
             max_steps=max_steps,
             max_budget=max_budget,
             max_time_seconds=max_time_seconds,
-            use_native_tools=True,
         )
 
         # Real-time streaming setup
@@ -407,7 +415,6 @@ class Agent(Generic[Deps, Result]):
         react_orchestrator = ReActFactory.create_orchestrator(
             agent=self,
             max_steps=10,  # Each subtask gets up to 10 ReAct steps
-            use_native_tools=True,
         )
 
         # Create Plan and Execute orchestrator

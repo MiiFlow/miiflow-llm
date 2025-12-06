@@ -1,18 +1,41 @@
 """Focused ReAct orchestrator with clean separation of concerns."""
 
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
 from ..agent import RunContext
 from ..message import Message, MessageRole
-from .data import REACT_SYSTEM_PROMPT, ReActResult, ReActStep, StopReason
+from .data import ReActResult, ReActStep, StopReason
 from .events import EventBus, EventFactory
 from .parsing.xml_parser import XMLReActParser
 from .safety import SafetyManager
 from .tool_executor import AgentToolExecutor
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_xml_tags_from_answer(content: str) -> str:
+    """Strip XML thinking/answer tags from content to get clean answer text.
+
+    This handles cases where LLM outputs raw XML tags that weren't parsed properly
+    during streaming, ensuring users see clean content without internal markup.
+    """
+    if not content:
+        return content
+
+    # Remove <thinking>...</thinking> blocks entirely
+    content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove standalone opening/closing tags that might remain
+    content = re.sub(r'</?thinking>', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'</?answer>', '', content, flags=re.IGNORECASE)
+
+    # Clean up extra whitespace from removed tags
+    content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+
+    return content.strip()
 
 
 def _sanitize_error_message(error_msg: str) -> str:
@@ -70,13 +93,11 @@ class ReActOrchestrator:
         event_bus: EventBus,
         safety_manager: SafetyManager,
         parser: XMLReActParser,
-        use_native_tools: bool = False,
     ):
         self.tool_executor = tool_executor
         self.event_bus = event_bus
         self.safety_manager = safety_manager
         self.parser = parser
-        self.use_native_tools = use_native_tools
 
     async def execute(self, query: str, context: RunContext) -> ReActResult:
         execution_state = ExecutionState()
@@ -88,11 +109,8 @@ class ReActOrchestrator:
                 if await self._should_stop(execution_state):
                     break
 
-                # Route to appropriate reasoning method based on configuration
-                if self.use_native_tools:
-                    step = await self._execute_reasoning_step_native(context, execution_state)
-                else:
-                    step = await self._execute_reasoning_step(context, execution_state)
+                # Execute reasoning step with native tool calling
+                step = await self._execute_reasoning_step_native(context, execution_state)
 
                 execution_state.steps.append(step)
 
@@ -139,26 +157,17 @@ class ReActOrchestrator:
         if context.messages is None:
             context.messages = []
 
-        tools_info = self.tool_executor.build_tools_description()
+        # Native tool calling: tools are sent via API's tools parameter,
+        # so we don't need to include them in the system prompt
+        from .data import REACT_NATIVE_SYSTEM_PROMPT
 
-        # Choose appropriate system prompt based on mode
-        if self.use_native_tools:
-            from .data import REACT_NATIVE_SYSTEM_PROMPT
+        system_prompt = REACT_NATIVE_SYSTEM_PROMPT
 
-            system_prompt = REACT_NATIVE_SYSTEM_PROMPT.format(tools=tools_info)
-        else:
-            system_prompt = REACT_SYSTEM_PROMPT.format(tools=tools_info)
-
-        # DEBUG: Check for existing system prompt in context
+        # Check for existing system prompt in context and merge if needed
         existing_system_prompts = [
             msg for msg in context.messages if msg.role == MessageRole.SYSTEM
         ]
         if existing_system_prompts:
-            logger.warning(
-                f"[STREAMING ISSUE] Found {len(existing_system_prompts)} existing system prompt(s) in context.messages! "
-                f"This may override ReAct XML tag instructions. "
-                f"First system prompt preview: {existing_system_prompts[0].content[:200]}..."
-            )
             # Merge assistant's system prompt with ReAct prompt instead of having two separate ones
             assistant_prompt = existing_system_prompts[0].content
             merged_prompt = f"""{assistant_prompt}
@@ -166,9 +175,6 @@ class ReActOrchestrator:
 ---
 
 {system_prompt}"""
-            logger.info(
-                f"[STREAMING FIX] Merging assistant system prompt with ReAct prompt to avoid conflicts"
-            )
             # Remove existing system prompts from context
             context_messages_without_system = [
                 msg for msg in context.messages if msg.role != MessageRole.SYSTEM
@@ -275,8 +281,8 @@ class ReActOrchestrator:
                             )
 
                         elif parse_event.event_type == ParseEventType.ANSWER_COMPLETE:
-                            # Answer complete
-                            step.answer = parse_event.data["answer"]
+                            # Answer complete - sanitize to remove any residual XML tags
+                            step.answer = _strip_xml_tags_from_answer(parse_event.data["answer"])
 
                     # Note: If chunk was not parsed (no XML tags), we accumulate in buffer
                     # but don't emit yet since we can't distinguish thinking from answer
@@ -511,11 +517,12 @@ class ReActOrchestrator:
                 if not step.answer:
                     # Check step.thought first (XML-parsed thinking)
                     if step.thought and await self._is_final_answer(step.thought):
-                        step.answer = step.thought
+                        step.answer = _strip_xml_tags_from_answer(step.thought)
                     # If no thought but we have buffer content, check if it's a final answer
                     elif not step.thought and assistant_content:
                         if await self._is_final_answer(assistant_content):
-                            step.answer = assistant_content
+                            # Sanitize to remove any <thinking> tags that weren't parsed
+                            step.answer = _strip_xml_tags_from_answer(assistant_content)
                             # Note: Chunks were already emitted in real-time during streaming
                             # No need to emit again here
 
@@ -572,11 +579,12 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
             messages = [Message(role=MessageRole.USER, content=classification_prompt)]
 
             # Use low temperature for deterministic classification
+            # max_tokens=50 gives buffer for models that add extra formatting/whitespace
             response = await self.tool_executor._client.achat(
-                messages=messages, temperature=0.0, max_tokens=10  # Only need one word
+                messages=messages, temperature=0.0, max_tokens=50
             )
 
-            classification = response.message.content.strip().upper()
+            classification = (response.message.content or "").strip().upper()
 
             # Validate response
             if "ANSWER" in classification:
@@ -584,9 +592,10 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
             elif "THINKING" in classification:
                 return "THINKING"
             else:
-                # Fallback to heuristic if LLM returns unexpected response
-                logger.warning(
-                    f"Unexpected classification response: {classification}, falling back to heuristic"
+                # Fallback to heuristic if LLM returns empty or unexpected response
+                # This is normal behavior, not a warning - some providers may return empty responses
+                logger.debug(
+                    f"Classification response '{classification}' not recognized, using heuristic"
                 )
                 return "ANSWER" if self._heuristic_is_final_answer(content) else "THINKING"
 
@@ -669,282 +678,6 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
         """
         classification = await self._classify_response_type(thought)
         return classification == "ANSWER"
-
-    async def _execute_reasoning_step(
-        self, context: RunContext, state: "ExecutionState"
-    ) -> ReActStep:
-        """Execute a single reasoning step with XML streaming parsing (legacy)."""
-        step = ReActStep(step_number=state.current_step, thought="")
-
-        step_start_time = time.time()
-
-        try:
-            # DEBUG: Log conversation context before LLM call
-            logger.debug(
-                f"Step {state.current_step} - Conversation context has {len(context.messages)} messages:"
-            )
-            for i, msg in enumerate(context.messages[-5:]):  # Last 5 messages
-                logger.debug(f"  [{i}] {msg.role}: {msg.content[:100]}...")
-
-            # Publish step start event
-            await self.event_bus.publish(EventFactory.step_started(state.current_step))
-
-            # Stream LLM response with real-time XML parsing
-            buffer = ""
-            tokens_used = 0
-            cost = 0.0
-            answer_detected = False
-
-            # Reset parser for new response
-            self.parser.reset()
-
-            async for chunk in self._stream_llm_response(context):
-                if chunk.delta:
-                    buffer += chunk.delta
-
-                    # Debug: Log chunks as they arrive
-                    if len(buffer) <= 50:
-                        logger.debug(
-                            f"Step {state.current_step} - Chunk received, buffer now: {buffer}"
-                        )
-                    elif len(buffer) == 51:
-                        logger.debug(
-                            f"Step {state.current_step} - Buffer growing, now {len(buffer)} chars..."
-                        )
-
-                    # Parse XML incrementally
-                    from .parsing.xml_parser import ParseEventType
-
-                    # Track if this chunk was handled by XML parser
-                    chunk_was_parsed = False
-
-                    for parse_event in self.parser.parse_streaming(chunk.delta):
-                        chunk_was_parsed = True
-                        if parse_event.event_type == ParseEventType.THINKING:
-                            # Thinking chunk detected - emit streaming chunk
-                            delta = parse_event.data["delta"]
-                            await self.event_bus.publish(
-                                EventFactory.thinking_chunk(state.current_step, delta, buffer)
-                            )
-
-                        elif parse_event.event_type == ParseEventType.THINKING_COMPLETE:
-                            # Complete thinking extracted
-                            step.thought = parse_event.data["thought"]
-                            # Publish complete thought event
-                            await self.event_bus.publish(
-                                EventFactory.thought(state.current_step, step.thought)
-                            )
-
-                        elif parse_event.event_type == ParseEventType.TOOL_CALL:
-                            # Tool call detected
-                            step.action = parse_event.data["tool_name"]
-                            step.action_input = parse_event.data["parameters"]
-
-                        elif parse_event.event_type == ParseEventType.ANSWER_START:
-                            # <answer> tag detected - enter streaming answer mode
-                            answer_detected = True
-                            state.ready_for_answer = True
-
-                        elif parse_event.event_type == ParseEventType.ANSWER_CHUNK:
-                            # Stream answer chunks in real-time
-                            delta = parse_event.data["delta"]
-                            if not hasattr(state, "accumulated_answer"):
-                                state.accumulated_answer = ""
-                            state.accumulated_answer += delta
-                            # Emit streaming chunk event
-                            await self.event_bus.publish(
-                                EventFactory.final_answer_chunk(
-                                    state.current_step, delta, state.accumulated_answer
-                                )
-                            )
-
-                        elif parse_event.event_type == ParseEventType.ANSWER_COMPLETE:
-                            # Answer complete
-                            step.answer = parse_event.data["answer"]
-
-                    # Note: If chunk was not parsed (no XML tags), we accumulate in buffer
-                    # but don't emit yet since we can't distinguish thinking from answer
-                    # without XML tags. We'll classify and emit after streaming completes.
-
-                # Accumulate metrics
-                if chunk.usage:
-                    tokens_used = chunk.usage.total_tokens
-                if hasattr(chunk, "cost"):
-                    cost += chunk.cost
-
-            # DEBUG: Log what we received
-            logger.debug(
-                f"Step {state.current_step} - Stream completed. Buffer length: {len(buffer)}, tokens: {tokens_used}"
-            )
-            if buffer:
-                logger.debug(f"Step {state.current_step} - Buffer content: {buffer[:500]}")
-
-            # Set accumulated metrics
-            step.tokens_used = tokens_used
-            step.cost = cost
-
-            # Check if parser successfully parsed any content (thinking, tool calls, or answer)
-            has_content = self.parser.has_parsed_content
-            has_valid_step = step.thought or step.action or step.answer
-            has_actionable_content = step.action or step.answer
-
-            logger.debug(
-                f"Step {state.current_step} validation - "
-                f"has_parsed_content: {has_content}, "
-                f"has_valid_step: {has_valid_step}, "
-                f"has_actionable: {has_actionable_content}, "
-                f"buffer_len: {len(buffer)}"
-            )
-
-            # Detect malformed responses and determine if retry is needed
-            needs_retry = False
-            retry_reason = None
-
-            # Check 1: Thinking-only response (missing action)
-            if step.thought and not has_actionable_content:
-                logger.warning(
-                    f"Step {state.current_step}: LLM output only <thinking> without <tool_call> or <answer>. "
-                    f"This violates the ReAct pattern."
-                )
-                needs_retry = True
-                retry_reason = "thinking_only"
-
-            # Check 2: Completely empty response
-            elif not has_content and not has_valid_step and not buffer.strip():
-                logger.warning(
-                    f"Step {state.current_step}: LLM returned completely empty response."
-                )
-                step.error = "LLM returned completely empty response"
-                needs_retry = True
-                retry_reason = "empty_response"
-
-            # Check 3: Content without XML tags
-            elif buffer.strip() and not has_content:
-                logger.warning(
-                    f"Step {state.current_step}: LLM response missing XML tags. "
-                    f"Content present but no <thinking>, <tool_call>, or <answer> detected."
-                )
-                needs_retry = True
-                retry_reason = "missing_xml_tags"
-
-            # CRITICAL FIX: Always preserve the assistant's response in conversation history
-            # This ensures proper action-observation pairing for the LLM
-            assistant_content = buffer.strip()
-
-            # If buffer is empty but we parsed content, reconstruct from parsed data
-            if not assistant_content and (step.thought or step.action or step.answer):
-                logger.debug(f"Reconstructing assistant message from parsed components")
-                parts = []
-                if step.thought:
-                    parts.append(f"<thinking>\n{step.thought}\n</thinking>")
-                if step.action:
-                    # Reconstruct tool call XML
-                    params_str = ""
-                    if step.action_input:
-                        if isinstance(step.action_input, dict):
-                            params_items = [f"<{k}>{v}</{k}>" for k, v in step.action_input.items()]
-                            params_str = "\n".join(params_items)
-                        else:
-                            params_str = str(step.action_input)
-                    parts.append(
-                        f"<tool_call>\n<tool_name>{step.action}</tool_name>\n<parameters>\n{params_str}\n</parameters>\n</tool_call>"
-                    )
-                if step.answer:
-                    parts.append(f"<answer>\n{step.answer}\n</answer>")
-                assistant_content = "\n".join(parts)
-
-            # Append assistant's message to maintain conversation flow
-            if assistant_content:
-                response_message = Message(role=MessageRole.ASSISTANT, content=assistant_content)
-                context.messages.append(response_message)
-                logger.debug(f"Added assistant message to context: {assistant_content[:100]}...")
-
-            # Add retry prompt if needed
-            if needs_retry:
-                # Track retry attempts to avoid infinite loops
-                if not hasattr(state, "retry_count"):
-                    state.retry_count = 0
-
-                state.retry_count += 1
-
-                # Only retry once per step to avoid loops
-                if state.retry_count <= 1:
-                    # Craft specific recovery prompt based on the issue
-                    if retry_reason == "thinking_only":
-                        recovery_prompt = (
-                            "Your previous response contained only <thinking> tags without an action. "
-                            "You MUST follow <thinking> with either:\n"
-                            '1. <tool_call name="tool_name">{...}</tool_call> to execute a tool, OR\n'
-                            "2. <answer>Your final answer here</answer> to provide your final response.\n\n"
-                            "NEVER end your response with only <thinking>. Please try again with a complete response."
-                        )
-                    elif retry_reason == "missing_xml_tags":
-                        recovery_prompt = (
-                            "Your previous response did not use proper XML tags. "
-                            "You MUST structure your response using XML tags:\n\n"
-                            "<thinking>Your reasoning here</thinking>\n"
-                            '<tool_call name="tool_name">{...}</tool_call> OR <answer>Your final answer</answer>\n\n'
-                            "Please provide your response again with proper XML structure."
-                        )
-                    else:  # empty_response
-                        recovery_prompt = (
-                            "Your previous response was empty. Please provide a valid response using:\n"
-                            '1. <tool_call name="tool_name">{...}</tool_call> to execute a tool, OR\n'
-                            "2. <answer>Your final answer here</answer> to provide your final response.\n\n"
-                            "Remember to use proper XML tags."
-                        )
-
-                    recovery_message = Message(role=MessageRole.USER, content=recovery_prompt)
-                    context.messages.append(recovery_message)
-                    logger.info(
-                        f"Step {state.current_step} - Added retry prompt for {retry_reason} "
-                        f"(retry {state.retry_count}/1)"
-                    )
-                else:
-                    logger.warning(
-                        f"Step {state.current_step} - Max retries reached for {retry_reason}, "
-                        f"continuing without retry"
-                    )
-                    # Reset retry count for next step
-                    state.retry_count = 0
-
-            # Handle tool action if detected (AFTER adding assistant message)
-            if step.action and not answer_detected:
-                await self._handle_tool_action(step, context, state)
-
-        except Exception as e:
-            self._handle_step_error(step, e, state)
-
-        finally:
-            step.execution_time = time.time() - step_start_time
-            await self.event_bus.publish(EventFactory.step_complete(state.current_step, step))
-
-        # Add observation to context
-        # IMPORTANT: Use USER role for observations, not SYSTEM
-        # Anthropic API only allows SYSTEM messages at the start of conversation
-        if step.observation:
-            observation_message = Message(
-                role=MessageRole.USER,
-                content=f"<observation>\n{step.observation}\n</observation>",
-            )
-            context.messages.append(observation_message)
-            logger.debug(
-                f"Step {state.current_step} - Added observation to context: {step.observation[:100]}..."
-            )
-            logger.debug(
-                f"Step {state.current_step} - Context now has {len(context.messages)} messages"
-            )
-
-        return step
-
-    async def _get_llm_response(self, context: RunContext):
-        """Get LLM response without tools (pure ReAct pattern)."""
-        return await self.tool_executor.execute_without_tools(messages=context.messages)
-
-    async def _stream_llm_response(self, context: RunContext):
-        """Stream LLM response without tools (pure ReAct pattern)."""
-        async for chunk in self.tool_executor.stream_without_tools(messages=context.messages):
-            yield chunk
 
     async def _handle_tool_action(
         self,
@@ -1059,10 +792,12 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
         """Publish final answer event.
 
         Note: With XML streaming, answer chunks are already emitted during parsing.
-        This method is called for final confirmation only.
+        This method publishes the complete final_answer event for consumers like agent.run()
+        that need to capture the complete answer.
         """
-        # If answer wasn't streamed (error case), publish complete answer
-        if step.answer and not hasattr(state, "accumulated_answer"):
+        # Always publish final_answer event with complete answer
+        # Chunks were streamed incrementally, but agent.run() needs the complete event
+        if step.answer:
             await self.event_bus.publish(EventFactory.final_answer(state.current_step, step.answer))
 
     def _build_result(self, state: "ExecutionState") -> ReActResult:

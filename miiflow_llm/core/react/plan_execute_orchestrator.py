@@ -227,9 +227,9 @@ class PlanAndExecuteOrchestrator:
         await self._publish_event(PlanExecuteEventType.PLANNING_START, {"goal": query})
 
         try:
-            # Build planning prompt with tool info
-            tools_info = self.tool_executor.build_tools_description()
-            planning_prompt = PLANNING_WITH_TOOL_SYSTEM_PROMPT.format(tools=tools_info)
+            # Use planning prompt directly - tool schemas are sent via API's tools parameter,
+            # so we don't need to include them in the system prompt
+            planning_prompt = PLANNING_WITH_TOOL_SYSTEM_PROMPT
 
             logger.info("Generating plan using tool call with streaming thinking")
 

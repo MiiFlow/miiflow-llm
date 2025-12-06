@@ -197,6 +197,8 @@ class ReActEvent:
 
 
 # System prompt template for native tool calling ReAct reasoning
+# NOTE: This prompt does NOT include tool descriptions because native tool calling
+# sends tool schemas via the API's tools parameter. Including them here would be redundant.
 REACT_NATIVE_SYSTEM_PROMPT = """You are a problem-solving AI assistant using the ReAct (Reasoning + Acting) framework with native tool calling.
 
 CRITICAL: Structure your responses with XML tags for clarity:
@@ -216,9 +218,6 @@ Then either:
 Your complete, final answer to the user's question.
 Be clear, concise, and comprehensive.
 </answer>
-
-Available tools:
-{tools}
 
 Guidelines:
 1. **Always use <thinking> tags**: Wrap ALL your reasoning in <thinking> tags to separate thinking from final answers
@@ -849,6 +848,8 @@ Respond with ONLY the revised JSON plan."""
 
 
 # System prompt for planning with tool call (unified pattern with ReAct)
+# NOTE: This prompt does NOT include tool descriptions because native tool calling
+# sends tool schemas via the API's tools parameter. Including them here would be redundant.
 PLANNING_WITH_TOOL_SYSTEM_PROMPT = """You are a planning assistant that analyzes tasks and creates execution plans.
 
 CRITICAL: Structure your response with XML thinking tags, then call the create_plan tool:
@@ -862,9 +863,6 @@ Analyze the task complexity and explain your planning strategy:
 </thinking>
 
 Then call the create_plan tool with your structured plan.
-
-Available tools for execution:
-{tools}
 
 Task Complexity Guidelines:
 - **Simple queries** (greetings, thanks, clarifications): Return empty subtasks []
@@ -994,7 +992,35 @@ For non-empty plans, each subtask should have:
 - success_criteria (str): How to verify this subtask succeeded
 
 Return [] for greetings, acknowledgments, and simple conversational queries.""",
-                required=True
+                required=True,
+                items={
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "integer",
+                            "description": "Unique identifier for the subtask (1, 2, 3, ...)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Clear, specific description of what to do"
+                        },
+                        "required_tools": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tools needed for this subtask"
+                        },
+                        "dependencies": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": "IDs of subtasks that must complete first"
+                        },
+                        "success_criteria": {
+                            "type": "string",
+                            "description": "How to verify this subtask succeeded"
+                        }
+                    },
+                    "required": ["id", "description"]
+                }
             )
         }
     )

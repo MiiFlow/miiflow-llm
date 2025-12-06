@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,13 @@ from .types import ToolType
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match provider patterns (e.g., OpenAI's ^[a-zA-Z0-9_-]+$)."""
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized[:64]
+
+
 class ToolRegistry:
     """Tool registry with allowlist validation and safe execution."""
 
@@ -23,6 +31,8 @@ class ToolRegistry:
         self.allowlist = set(allowlist) if allowlist else None
         self.enable_logging = enable_logging
         self.execution_stats: Dict[str, Dict[str, Any]] = {}
+        # Map sanitized names back to original names for provider compatibility
+        self._sanitized_to_original: Dict[str, str] = {}
 
     def register(self, tool) -> None:
         """Register a function tool with allowlist validation."""
@@ -48,6 +58,11 @@ class ToolRegistry:
             "total_time": 0.0,
         }
 
+        # Register sanitized name mapping for OpenAI compatibility
+        sanitized_name = _sanitize_tool_name(tool_name)
+        if sanitized_name != tool_name:
+            self._sanitized_to_original[sanitized_name] = tool_name
+
         if self.enable_logging:
             logger.info(f"Registered function tool: {tool_name}")
 
@@ -70,16 +85,27 @@ class ToolRegistry:
             "total_time": 0.0,
         }
 
+        # Register sanitized name mapping for OpenAI compatibility
+        sanitized_name = _sanitize_tool_name(schema.name)
+        if sanitized_name != schema.name:
+            self._sanitized_to_original[sanitized_name] = schema.name
+
         if self.enable_logging:
             logger.info(f"Registered HTTP tool: {schema.name} -> {schema.url}")
 
+    def _resolve_name(self, name: str) -> str:
+        """Resolve a potentially sanitized name back to the original name."""
+        return self._sanitized_to_original.get(name, name)
+
     def get(self, name: str) -> Optional[FunctionTool]:
-        """Get a function tool by name."""
-        return self.tools.get(name)
+        """Get a function tool by name (supports sanitized names from OpenAI)."""
+        resolved_name = self._resolve_name(name)
+        return self.tools.get(resolved_name)
 
     def get_http_tool(self, name: str) -> Optional[HTTPTool]:
-        """Get an HTTP tool by name."""
-        return self.http_tools.get(name)
+        """Get an HTTP tool by name (supports sanitized names from OpenAI)."""
+        resolved_name = self._resolve_name(name)
+        return self.http_tools.get(resolved_name)
 
     def list_tools(self) -> List[str]:
         """List all registered tool names (function and HTTP)."""
@@ -107,18 +133,21 @@ class ToolRegistry:
 
     def validate_tool_call(self, name: str, **kwargs) -> bool:
         """Validate a tool call against schema and allowlist."""
-        if name not in self.tools and name not in self.http_tools:
+        # Resolve sanitized name back to original (for OpenAI compatibility)
+        resolved_name = self._resolve_name(name)
+
+        if resolved_name not in self.tools and resolved_name not in self.http_tools:
             return False
 
-        if self.allowlist and name not in self.allowlist:
+        if self.allowlist and resolved_name not in self.allowlist:
             return False
 
         try:
-            if name in self.tools:
-                tool = self.tools[name]
+            if resolved_name in self.tools:
+                tool = self.tools[resolved_name]
                 tool.validate_inputs(**kwargs)
             else:
-                http_tool = self.http_tools[name]
+                http_tool = self.http_tools[resolved_name]
                 http_tool._validate_parameters(kwargs)
             return True
         except Exception:
@@ -126,8 +155,11 @@ class ToolRegistry:
 
     async def execute_safe(self, tool_name: str, **kwargs) -> ToolResult:
         """Execute a tool with comprehensive error handling and stats tracking."""
-        if tool_name in self.execution_stats:
-            self.execution_stats[tool_name]["calls"] += 1
+        # Resolve sanitized name back to original (for OpenAI compatibility)
+        resolved_name = self._resolve_name(tool_name)
+
+        if resolved_name in self.execution_stats:
+            self.execution_stats[resolved_name]["calls"] += 1
 
         function_tool = self.get(tool_name)
         http_tool = self.get_http_tool(tool_name)
@@ -139,7 +171,7 @@ class ToolRegistry:
                 logger.error(error_msg)
 
             return ToolResult(
-                name=tool_name,
+                name=resolved_name,
                 input=kwargs,
                 output=None,
                 error=error_msg,
@@ -147,13 +179,13 @@ class ToolRegistry:
                 metadata={"error_type": "tool_not_found"},
             )
 
-        if self.allowlist and tool_name not in self.allowlist:
-            error_msg = f"Tool '{tool_name}' not in allowlist: {sorted(self.allowlist)}"
+        if self.allowlist and resolved_name not in self.allowlist:
+            error_msg = f"Tool '{resolved_name}' not in allowlist: {sorted(self.allowlist)}"
             if self.enable_logging:
                 logger.error(error_msg)
 
             return ToolResult(
-                name=tool_name,
+                name=resolved_name,
                 input=kwargs,
                 output=None,
                 error=error_msg,
@@ -167,8 +199,8 @@ class ToolRegistry:
             else:
                 result = await http_tool.execute(**kwargs)
 
-            if tool_name in self.execution_stats:
-                stats = self.execution_stats[tool_name]
+            if resolved_name in self.execution_stats:
+                stats = self.execution_stats[resolved_name]
                 stats["total_time"] += result.execution_time
                 if result.success:
                     stats["successes"] += 1
@@ -178,16 +210,16 @@ class ToolRegistry:
             return result
 
         except Exception as e:
-            error_msg = f"Registry error executing '{tool_name}': {str(e)}"
+            error_msg = f"Registry error executing '{resolved_name}': {str(e)}"
             if self.enable_logging:
                 logger.debug(error_msg, exc_info=True)
             logger.error(error_msg)
 
-            if tool_name in self.execution_stats:
-                self.execution_stats[tool_name]["failures"] += 1
+            if resolved_name in self.execution_stats:
+                self.execution_stats[resolved_name]["failures"] += 1
 
             return ToolResult(
-                name=tool_name,
+                name=resolved_name,
                 input=kwargs,
                 output=None,
                 error=error_msg,
@@ -197,19 +229,22 @@ class ToolRegistry:
 
     async def execute_safe_with_context(self, tool_name: str, context: Any, **kwargs) -> ToolResult:
         """Execute tool with context as first parameter (Pydantic AI pattern)."""
-        if tool_name not in self.tools:
+        # Resolve sanitized name back to original (for OpenAI compatibility)
+        resolved_name = self._resolve_name(tool_name)
+
+        if resolved_name not in self.tools:
             available_tools = list(self.tools.keys()) + list(self.http_tools.keys())
             return ToolResult(
-                name=tool_name,
+                name=resolved_name,
                 input=kwargs,
                 success=False,
                 error=f"Tool '{tool_name}' not found. Available: {available_tools}",
             )
 
-        if tool_name in self.execution_stats:
-            self.execution_stats[tool_name]["calls"] += 1
+        if resolved_name in self.execution_stats:
+            self.execution_stats[resolved_name]["calls"] += 1
 
-        tool = self.tools[tool_name]
+        tool = self.tools[resolved_name]
         start_time = time.time()
 
         try:
@@ -226,13 +261,13 @@ class ToolRegistry:
 
             execution_time = time.time() - start_time
 
-            if tool_name in self.execution_stats:
-                stats = self.execution_stats[tool_name]
+            if resolved_name in self.execution_stats:
+                stats = self.execution_stats[resolved_name]
                 stats["total_time"] += execution_time
                 stats["successes"] += 1
 
             return ToolResult(
-                name=tool_name,
+                name=resolved_name,
                 input={"context": "<RunContext>", **kwargs},
                 output=result,
                 success=True,
@@ -242,14 +277,14 @@ class ToolRegistry:
 
         except Exception as e:
             execution_time = time.time() - start_time
-            error_msg = f"Tool '{tool_name}' failed: {str(e)}"
+            error_msg = f"Tool '{resolved_name}' failed: {str(e)}"
             logger.error(error_msg)
 
-            if tool_name in self.execution_stats:
-                self.execution_stats[tool_name]["failures"] += 1
+            if resolved_name in self.execution_stats:
+                self.execution_stats[resolved_name]["failures"] += 1
 
             return ToolResult(
-                name=tool_name,
+                name=resolved_name,
                 input={"context": "<RunContext>", **kwargs},
                 output=None,
                 error=error_msg,

@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import re
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import openai
@@ -14,6 +15,13 @@ from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, Text
 from ..core.metrics import TokenCount, UsageData
 from ..core.streaming import StreamChunk
 from ..models.openai import get_token_param_name, supports_temperature
+
+
+def _sanitize_tool_name(name: str) -> str:
+    """Sanitize tool name to match OpenAI's pattern: ^[a-zA-Z0-9_-]+$"""
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized[:64]  # OpenAI has a 64 char limit for function names
 
 
 class OpenAIStreaming:
@@ -66,9 +74,14 @@ class OpenAIStreaming:
                                     hasattr(tool_call_delta.function, "name")
                                     and tool_call_delta.function.name
                                 ):
+                                    # Restore original name if it was sanitized
+                                    sanitized_name = tool_call_delta.function.name
+                                    original_name = OpenAIClient._tool_name_mapping.get(
+                                        sanitized_name, sanitized_name
+                                    )
                                     self._accumulated_tool_calls[idx]["function"][
                                         "name"
-                                    ] = tool_call_delta.function.name
+                                    ] = original_name
 
                                 if (
                                     hasattr(tool_call_delta.function, "arguments")
@@ -108,6 +121,10 @@ class OpenAIStreaming:
 
 class OpenAIClient(OpenAIStreaming, ModelClient):
     """OpenAI provider client."""
+
+    # Class-level mapping shared across instances for tool name resolution
+    # Maps sanitized names back to original names
+    _tool_name_mapping: Dict[str, str] = {}
 
     def __init__(self, model: str, api_key: Optional[str] = None, **kwargs):
         super().__init__(model=model, api_key=api_key, **kwargs)
@@ -167,12 +184,32 @@ class OpenAIClient(OpenAIStreaming, ModelClient):
             self._add_additional_properties(obj["items"])
 
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        return OpenAIClient.convert_schema_to_openai_format(schema)
+        """Convert universal schema to OpenAI format with name sanitization."""
+        original_name = schema["name"]
+        sanitized_name = _sanitize_tool_name(original_name)
+
+        # Track mapping for restoring original names from tool call responses
+        if sanitized_name != original_name:
+            OpenAIClient._tool_name_mapping[sanitized_name] = original_name
+
+        sanitized_schema = {**schema, "name": sanitized_name}
+        return {"type": "function", "function": sanitized_schema}
 
     @staticmethod
     def convert_schema_to_openai_format(schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert universal schema to OpenAI format (static for reuse by compatible providers)."""
-        return {"type": "function", "function": schema}
+        """Convert universal schema to OpenAI format with name sanitization.
+
+        Note: For proper name mapping support, use convert_schema_to_provider_format instead.
+        """
+        original_name = schema["name"]
+        sanitized_name = _sanitize_tool_name(original_name)
+
+        # Track mapping for restoring original names from tool call responses
+        if sanitized_name != original_name:
+            OpenAIClient._tool_name_mapping[sanitized_name] = original_name
+
+        sanitized_schema = {**schema, "name": sanitized_name}
+        return {"type": "function", "function": sanitized_schema}
 
     def convert_message_to_provider_format(self, message: Message) -> Dict[str, Any]:
         return OpenAIClient.convert_message_to_openai_format(message)
@@ -218,7 +255,15 @@ class OpenAIClient(OpenAIStreaming, ModelClient):
         if message.tool_call_id:
             openai_message["tool_call_id"] = message.tool_call_id
         if message.tool_calls:
-            openai_message["tool_calls"] = message.tool_calls
+            # Sanitize tool names in tool_calls for OpenAI compatibility
+            sanitized_tool_calls = []
+            for tc in message.tool_calls:
+                sanitized_tc = copy.deepcopy(tc) if isinstance(tc, dict) else tc
+                if isinstance(sanitized_tc, dict) and "function" in sanitized_tc:
+                    original_name = sanitized_tc["function"].get("name", "")
+                    sanitized_tc["function"]["name"] = _sanitize_tool_name(original_name)
+                sanitized_tool_calls.append(sanitized_tc)
+            openai_message["tool_calls"] = sanitized_tool_calls
 
         return openai_message
 

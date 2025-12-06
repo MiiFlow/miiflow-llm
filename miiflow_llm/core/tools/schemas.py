@@ -125,14 +125,19 @@ class ToolSchema:
         return schema
     
     def to_provider_format(self, provider: str) -> Dict[str, Any]:
-        """Convert to provider-specific format."""
+        """Convert to provider-specific format.
+
+        Note: This is a fallback method. Provider clients should use their own
+        convert_schema_to_provider_format() method for proper name sanitization
+        and mapping support.
+        """
         # Direct implementation to avoid import issues
         universal = self.to_universal_schema()
-        
+
         provider = provider.lower()
-        
+
         if provider in ["openai", "groq", "xai", "mistral", "ollama"]:
-            # OpenAI format
+            # OpenAI format - name sanitization is handled by provider clients
             return {
                 "type": "function",
                 "function": universal

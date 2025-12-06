@@ -20,63 +20,98 @@ def detect_function_type(fn: Callable) -> FunctionType:
 
 def get_fun_schema(fn: Callable) -> Dict[str, Any]:
     """Generate comprehensive schema from function signature.
-    
+
     Extracts:
     - Function name and docstring
-    - Parameter types and descriptions 
+    - Parameter types and descriptions
     - Return type hints
     - Default values and requirements
+    - Array items types for List[T] parameters
     """
     sig = inspect.signature(fn)
     type_hints = get_type_hints(fn)
     doc = inspect.getdoc(fn) or ""
-    
+
     param_docs = _parse_docstring_params(doc)
-    
+
     properties = {}
     required = []
-    
+
     for param_name, param in sig.parameters.items():
         if param_name in ['context', 'self']:
             continue
-            
+
         param_type = type_hints.get(param_name, str)
         json_type = _python_type_to_json_type(param_type)
-        
+
         param_description = param_docs.get(param_name, f"Parameter {param_name}")
-        
+
         properties[param_name] = {
             "type": json_type.value,
             "description": param_description
         }
-        
+
+        # Add items schema for array types (required by OpenAI)
+        if json_type == ParameterType.ARRAY:
+            items_type = _get_array_items_type(param_type)
+            properties[param_name]["items"] = items_type
+
         if hasattr(param_type, '__members__'):
             properties[param_name]["enum"] = list(param_type.__members__.keys())
-        
+
         if param.default is inspect.Parameter.empty:
             required.append(param_name)
         else:
             properties[param_name]["default"] = param.default
-    
+
     return_type = type_hints.get('return', Any)
-    
+
     schema = {
         "name": fn.__name__,
         "description": doc.split('\n')[0] if doc else f"Function {fn.__name__}",
         "parameters": {
-            "type": "object", 
+            "type": "object",
             "properties": properties,
             "required": required
         }
     }
-    
+
     if return_type != Any:
         schema["returns"] = {
             "type": _python_type_to_json_type(return_type).value,
             "description": f"Returns {return_type.__name__}"
         }
-    
+
     return schema
+
+
+def _get_array_items_type(python_type: type) -> Dict[str, Any]:
+    """Extract the items type schema for List[T] types.
+
+    Args:
+        python_type: A Python type, potentially List[T]
+
+    Returns:
+        JSON schema for the array items
+    """
+    origin = getattr(python_type, '__origin__', None)
+
+    if origin in (list, List):
+        args = getattr(python_type, '__args__', ())
+        if args:
+            item_type = args[0]
+            # Handle nested types recursively
+            item_json_type = _python_type_to_json_type(item_type)
+            result = {"type": item_json_type.value}
+
+            # Handle nested arrays (List[List[T]])
+            if item_json_type == ParameterType.ARRAY:
+                result["items"] = _get_array_items_type(item_type)
+
+            return result
+
+    # Default to string items if type is unknown
+    return {"type": "string"}
 
 
 

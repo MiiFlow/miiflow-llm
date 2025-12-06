@@ -45,7 +45,8 @@ class FunctionTool:
                         type=param_type,
                         description=param_info.get('description', f'Parameter {param_name}'),
                         required=param_name in schema_dict['parameters'].get('required', []),
-                        default=param_info.get('default')
+                        default=param_info.get('default'),
+                        items=param_info.get('items')  # Propagate items for array types
                     )
             self.definition = ToolSchema(
                 name=name or schema_dict.get('name', fn.__name__),

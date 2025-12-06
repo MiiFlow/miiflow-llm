@@ -123,12 +123,14 @@ class AnthropicClient(ModelClient):
                 elif chunk.type == "message_stop":
                     finish_reason = "stop"
 
-            if hasattr(chunk, "usage"):
+            if hasattr(chunk, "usage") and chunk.usage is not None:
+                # Handle None values from Bedrock which may have usage object but None fields
+                input_tokens = getattr(chunk.usage, "input_tokens", None) or 0
+                output_tokens = getattr(chunk.usage, "output_tokens", None) or 0
                 usage = TokenCount(
-                    prompt_tokens=getattr(chunk.usage, "input_tokens", 0),
-                    completion_tokens=getattr(chunk.usage, "output_tokens", 0),
-                    total_tokens=getattr(chunk.usage, "input_tokens", 0)
-                    + getattr(chunk.usage, "output_tokens", 0),
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
                 )
 
         except AttributeError:

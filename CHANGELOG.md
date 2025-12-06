@@ -2,7 +2,24 @@
 
 All notable changes to miiflow-llm will be documented here.
 
-## [0.1.0] - 2024-11-30
+## [0.2.0] - 2025-12-05
+
+### Added
+- Enhanced system prompts for native tool calling with improved guidance
+
+### Changed
+- ReAct orchestrator now exclusively uses native tool calling (removed legacy XML-only path)
+- Simplified orchestrator architecture by removing `use_native_tools` parameter
+- Enhanced provider implementations (Gemini, OpenAI, Anthropic) for better compatibility
+- Improved response handling with XML tag sanitization for cleaner outputs
+- Agent.stream() now automatically injects user queries into message context
+
+### Fixed
+- Improved null safety in classification logic for edge cases
+- Better error handling for unexpected classification responses
+- Enhanced schema generation for array types and complex parameters
+
+## [0.1.0] - 2025-11-30
 
 ### Added
 - Unified interface for 9 LLM providers (OpenAI, Anthropic, Google Gemini, Groq, OpenRouter, Mistral, xAI, Ollama, Bedrock)
@@ -27,11 +44,3 @@ All notable changes to miiflow-llm will be documented here.
 - Provider-specific documentation
 - Contributing guidelines
 - Code of conduct
-
-## [Unreleased]
-
-### Planned
-- Additional providers (Cohere, AI21)
-- Batch processing
-- Response caching
-- Enhanced observability dashboards

@@ -156,7 +156,6 @@ async def plan_execute_manual_orchestrator():
     react_orchestrator = ReActFactory.create_orchestrator(
         agent=agent,
         max_steps=5,
-        use_native_tools=True,
     )
 
     # Create Plan & Execute orchestrator
