@@ -13,6 +13,7 @@ from ..core.exceptions import AuthenticationError, ModelError, ProviderError, Ra
 from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount, UsageData
+from ..core.stream_normalizer import AnthropicStreamNormalizer
 from ..core.streaming import StreamChunk
 from ..models.anthropic import supports_structured_outputs
 from ..utils.image import data_uri_to_base64_and_mimetype
@@ -29,121 +30,13 @@ class AnthropicClient(ModelClient):
         self.provider_name = "anthropic"
         self._tool_name_mapping: Dict[str, str] = {}
 
-        # Streaming state
-        self._accumulated_content = ""
-        self._current_tool_use = None
-        self._accumulated_tool_json = ""
-        self._tool_calls = []
-
-    def _reset_stream_state(self):
-        """Reset streaming state for a new streaming session."""
-        self._accumulated_content = ""
-        self._current_tool_use = None
-        self._accumulated_tool_json = ""
-        self._tool_calls = []
+        # Stream normalizer for unified streaming handling
+        # Note: Pass instance-level mapping for tool name restoration
+        self._stream_normalizer = AnthropicStreamNormalizer(self._tool_name_mapping)
 
     def _supports_structured_outputs(self) -> bool:
         """Check if the current model supports native structured outputs."""
         return supports_structured_outputs(self.model)
-
-    def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
-        """Normalize Anthropic streaming format to unified StreamChunk."""
-        delta = ""
-        finish_reason = None
-        usage = None
-        tool_calls = None
-
-        try:
-            # Anthropic event types
-            if hasattr(chunk, "type"):
-                if chunk.type == "content_block_start":
-                    # Check if this is a tool use block
-                    if hasattr(chunk, "content_block") and hasattr(chunk.content_block, "type"):
-                        if chunk.content_block.type == "tool_use":
-                            # Restore original tool name if it was sanitized
-                            tool_name = chunk.content_block.name
-                            original_name = self._tool_name_mapping.get(tool_name, tool_name)
-
-                            self._current_tool_use = {
-                                "id": chunk.content_block.id,
-                                "type": "function",
-                                "function": {"name": original_name, "arguments": {}},
-                            }
-                            self._accumulated_tool_json = ""
-
-                            # Yield tool call immediately
-                            tool_calls = [self._current_tool_use]
-
-                elif chunk.type == "content_block_delta":
-                    if hasattr(chunk.delta, "text"):
-                        # Text content
-                        delta = chunk.delta.text
-                        self._accumulated_content += delta
-
-                    elif hasattr(chunk.delta, "partial_json"):
-                        # Tool use input (streaming JSON)
-                        if self._current_tool_use:
-                            self._accumulated_tool_json += chunk.delta.partial_json
-
-                            # Try to parse accumulated JSON
-                            import json
-
-                            try:
-                                self._current_tool_use["function"]["arguments"] = json.loads(
-                                    self._accumulated_tool_json
-                                )
-                            except json.JSONDecodeError:
-                                # Still accumulating
-                                pass
-
-                elif chunk.type == "content_block_stop":
-                    # Finalize tool use if present
-                    if self._current_tool_use:
-                        if self._accumulated_tool_json:
-                            import json
-
-                            try:
-                                self._current_tool_use["function"]["arguments"] = json.loads(
-                                    self._accumulated_tool_json
-                                )
-                            except json.JSONDecodeError:
-                                self._current_tool_use["function"]["arguments"] = {}
-
-                        self._tool_calls.append(self._current_tool_use)
-                        # Yield complete tool call
-                        tool_calls = [self._current_tool_use]
-
-                        self._current_tool_use = None
-                        self._accumulated_tool_json = ""
-
-                elif chunk.type == "message_delta":
-                    if hasattr(chunk.delta, "stop_reason"):
-                        finish_reason = chunk.delta.stop_reason
-
-                elif chunk.type == "message_stop":
-                    finish_reason = "stop"
-
-            if hasattr(chunk, "usage") and chunk.usage is not None:
-                # Handle None values from Bedrock which may have usage object but None fields
-                input_tokens = getattr(chunk.usage, "input_tokens", None) or 0
-                output_tokens = getattr(chunk.usage, "output_tokens", None) or 0
-                usage = TokenCount(
-                    prompt_tokens=input_tokens,
-                    completion_tokens=output_tokens,
-                    total_tokens=input_tokens + output_tokens,
-                )
-
-        except AttributeError:
-            delta = str(chunk) if chunk else ""
-            self._accumulated_content += delta
-
-        return StreamChunk(
-            content=self._accumulated_content,
-            delta=delta,
-            finish_reason=finish_reason,
-            usage=usage,
-            tool_calls=tool_calls,
-        )
 
     def _loosen_json_schema(self, obj: Any) -> Any:
         """Remove strict schema constraints for better Anthropic model compliance."""
@@ -689,11 +582,11 @@ class AnthropicClient(ModelClient):
                 )
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             async for event in stream:
                 # Normalize Anthropic events to StreamChunk
-                normalized_chunk = self._normalize_stream_chunk(event)
+                normalized_chunk = self._stream_normalizer.normalize_chunk(event)
 
                 # Only yield if there's actual content or metadata to send
                 if (

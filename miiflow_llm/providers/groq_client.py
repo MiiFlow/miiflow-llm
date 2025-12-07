@@ -8,35 +8,27 @@ from groq import AsyncGroq, Groq
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from ..core.client import ChatResponse, ModelClient
-from ..core.exceptions import (
-    AuthenticationError,
-    ModelError,
-    ProviderError,
-    RateLimitError,
-    TimeoutError as MiiflowTimeoutError,
-)
+from ..core.exceptions import AuthenticationError, ModelError, ProviderError, RateLimitError
+from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount, UsageData
+from ..core.stream_normalizer import OpenAIStreamNormalizer
 from ..core.streaming import StreamChunk
-from .openai_client import OpenAIClient, OpenAIStreaming
+from .openai_client import OpenAIClient
 
 
-class GroqClient(OpenAIStreaming, ModelClient):
+class GroqClient(ModelClient):
     """Groq provider client."""
 
     def __init__(self, model: str, api_key: Optional[str] = None, **kwargs):
-        super().__init__(
-            model=model,
-            api_key=api_key,
-            **kwargs
-        )
+        super().__init__(model=model, api_key=api_key, **kwargs)
         self.client = AsyncGroq(api_key=api_key)
         self.provider_name = "groq"
 
-        # Initialize streaming state
-        self._accumulated_content = ""
-        self._accumulated_tool_calls = {}
-    
+        # Stream normalizer for unified streaming handling
+        # Note: Pass OpenAI's class-level mapping for tool name restoration
+        self._stream_normalizer = OpenAIStreamNormalizer(OpenAIClient._tool_name_mapping)
+
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to Groq format (OpenAI compatible)."""
         return OpenAIClient.convert_schema_to_openai_format(schema)
@@ -44,11 +36,9 @@ class GroqClient(OpenAIStreaming, ModelClient):
     def convert_message_to_provider_format(self, message: Message) -> Dict[str, Any]:
         """Convert Message to Groq format (OpenAI compatible)."""
         return OpenAIClient.convert_message_to_openai_format(message)
-    
+
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        reraise=True
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True
     )
     async def achat(
         self,
@@ -57,7 +47,7 @@ class GroqClient(OpenAIStreaming, ModelClient):
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         json_schema: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> ChatResponse:
         """Send chat completion request to Groq."""
         try:
@@ -79,65 +69,67 @@ class GroqClient(OpenAIStreaming, ModelClient):
             if json_schema:
                 request_params["response_format"] = {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "response_schema",
-                        "schema": json_schema
-                    }
+                    "json_schema": {"name": "response_schema", "schema": json_schema},
                 }
-            
+
             response = await asyncio.wait_for(
-                self.client.chat.completions.create(**request_params),
-                timeout=self.timeout
+                self.client.chat.completions.create(**request_params), timeout=self.timeout
             )
-            
+
             choice = response.choices[0]
             content = choice.message.content or ""
-            
+
             response_message = Message(
-                role=MessageRole.ASSISTANT,
-                content=content,
-                tool_calls=choice.message.tool_calls
+                role=MessageRole.ASSISTANT, content=content, tool_calls=choice.message.tool_calls
             )
-            
+
             usage = TokenCount(
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens
+                total_tokens=response.usage.total_tokens,
             )
-            
+
             return ChatResponse(
                 message=response_message,
                 usage=usage,
                 model=self.model,
                 provider=self.provider_name,
                 finish_reason=choice.finish_reason,
-                metadata={"response_id": response.id}
+                metadata={"response_id": response.id},
             )
-            
+
         except groq.AuthenticationError as e:
             raise AuthenticationError(str(e), self.provider_name, original_error=e)
         except groq.RateLimitError as e:
-            retry_after = getattr(e.response.headers, 'retry-after', None)
-            raise RateLimitError(str(e), self.provider_name, retry_after=retry_after, original_error=e)
+            retry_after = getattr(e.response.headers, "retry-after", None)
+            raise RateLimitError(
+                str(e), self.provider_name, retry_after=retry_after, original_error=e
+            )
         except groq.BadRequestError as e:
             raise ModelError(str(e), self.model, original_error=e)
         except groq.APIConnectionError as e:
-            raise ProviderError(f"Groq connection error: {str(e)}", self.provider_name, original_error=e)
+            raise ProviderError(
+                f"Groq connection error: {str(e)}", self.provider_name, original_error=e
+            )
         except asyncio.TimeoutError as e:
             raise MiiflowTimeoutError("Request timed out", self.timeout, original_error=e)
         except groq.APIStatusError as e:
             # Handle other HTTP status codes
             if e.status_code >= 500:
-                raise ProviderError(f"Groq server error ({e.status_code}): {str(e)}", self.provider_name, original_error=e)
+                raise ProviderError(
+                    f"Groq server error ({e.status_code}): {str(e)}",
+                    self.provider_name,
+                    original_error=e,
+                )
             else:
-                raise ModelError(f"Groq API error ({e.status_code}): {str(e)}", self.model, original_error=e)
+                raise ModelError(
+                    f"Groq API error ({e.status_code}): {str(e)}", self.model, original_error=e
+                )
         except Exception as e:
             raise ProviderError(f"Groq API error: {str(e)}", self.provider_name, original_error=e)
-    
+
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        reraise=True
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True
     )
     async def astream_chat(
         self,
@@ -146,7 +138,7 @@ class GroqClient(OpenAIStreaming, ModelClient):
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         json_schema: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncIterator[StreamChunk]:
         """Send streaming chat completion request to Groq."""
         try:
@@ -169,26 +161,22 @@ class GroqClient(OpenAIStreaming, ModelClient):
             if json_schema:
                 request_params["response_format"] = {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "response_schema",
-                        "schema": json_schema
-                    }
+                    "json_schema": {"name": "response_schema", "schema": json_schema},
                 }
-            
+
             stream = await asyncio.wait_for(
-                self.client.chat.completions.create(**request_params),
-                timeout=self.timeout
+                self.client.chat.completions.create(**request_params), timeout=self.timeout
             )
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             async for chunk in stream:
                 if not chunk.choices:
                     continue
 
-                # Use mixin to normalize Groq format to unified format
-                normalized_chunk = self._normalize_stream_chunk(chunk)
+                # Use normalizer to convert Groq format to unified format
+                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
                 # Only yield if there's content or metadata
                 if (
@@ -197,23 +185,37 @@ class GroqClient(OpenAIStreaming, ModelClient):
                     or normalized_chunk.finish_reason
                 ):
                     yield normalized_chunk
-            
+
         except groq.AuthenticationError as e:
             raise AuthenticationError(str(e), self.provider_name, original_error=e)
         except groq.RateLimitError as e:
-            retry_after = getattr(e.response.headers, 'retry-after', None)
-            raise RateLimitError(str(e), self.provider_name, retry_after=retry_after, original_error=e)
+            retry_after = getattr(e.response.headers, "retry-after", None)
+            raise RateLimitError(
+                str(e), self.provider_name, retry_after=retry_after, original_error=e
+            )
         except groq.BadRequestError as e:
             raise ModelError(str(e), self.model, original_error=e)
         except groq.APIConnectionError as e:
-            raise ProviderError(f"Groq streaming connection error: {str(e)}", self.provider_name, original_error=e)
+            raise ProviderError(
+                f"Groq streaming connection error: {str(e)}", self.provider_name, original_error=e
+            )
         except asyncio.TimeoutError as e:
             raise MiiflowTimeoutError("Streaming request timed out", self.timeout, original_error=e)
         except groq.APIStatusError as e:
             # Handle other HTTP status codes
             if e.status_code >= 500:
-                raise ProviderError(f"Groq streaming server error ({e.status_code}): {str(e)}", self.provider_name, original_error=e)
+                raise ProviderError(
+                    f"Groq streaming server error ({e.status_code}): {str(e)}",
+                    self.provider_name,
+                    original_error=e,
+                )
             else:
-                raise ModelError(f"Groq streaming API error ({e.status_code}): {str(e)}", self.model, original_error=e)
+                raise ModelError(
+                    f"Groq streaming API error ({e.status_code}): {str(e)}",
+                    self.model,
+                    original_error=e,
+                )
         except Exception as e:
-            raise ProviderError(f"Groq streaming error: {str(e)}", self.provider_name, original_error=e)
+            raise ProviderError(
+                f"Groq streaming error: {str(e)}", self.provider_name, original_error=e
+            )

@@ -16,11 +16,12 @@ from ..core.exceptions import (
 )
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount, UsageData
+from ..core.stream_normalizer import OpenAIStreamNormalizer
 from ..core.streaming import StreamChunk
-from .openai_client import OpenAIClient, OpenAIStreaming
+from .openai_client import OpenAIClient
 
 
-class XAIClient(OpenAIStreaming, ModelClient):
+class XAIClient(ModelClient):
     """xAI provider client."""
 
     def __init__(self, model: str, api_key: Optional[str] = None, **kwargs):
@@ -35,9 +36,9 @@ class XAIClient(OpenAIStreaming, ModelClient):
         )
         self.provider_name = "xai"
 
-        # Initialize streaming state
-        self._accumulated_content = ""
-        self._accumulated_tool_calls = {}
+        # Stream normalizer for unified streaming handling
+        # Note: Pass OpenAI's class-level mapping for tool name restoration
+        self._stream_normalizer = OpenAIStreamNormalizer(OpenAIClient._tool_name_mapping)
     
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to xAI format (OpenAI compatible)."""
@@ -172,13 +173,13 @@ class XAIClient(OpenAIStreaming, ModelClient):
             )
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             async for chunk in stream:
                 if not chunk.choices:
                     continue
 
-                normalized_chunk = self._normalize_stream_chunk(chunk)
+                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
                 # Only yield if there's content or metadata
                 if (

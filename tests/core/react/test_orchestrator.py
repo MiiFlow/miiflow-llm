@@ -8,12 +8,8 @@ from typing import List, Optional
 from miiflow_llm import LLMClient, Agent, AgentType, RunContext, Message, tool, ToolRegistry
 from miiflow_llm.core.react.orchestrator import ReActOrchestrator, ExecutionState
 from miiflow_llm.core.react.factory import ReActFactory
-from miiflow_llm.core.react.data import (
-    ReActStep,
-    ReActResult,
-    ReActEventType,
-    StopReason,
-)
+from miiflow_llm.core.react.enums import ReActEventType, StopReason
+from miiflow_llm.core.react.models import ReActStep, ReActResult
 from miiflow_llm.core.react.events import EventBus
 from miiflow_llm.core.react.safety import SafetyManager
 from miiflow_llm.core.react.tool_executor import AgentToolExecutor

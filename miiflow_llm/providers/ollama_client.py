@@ -13,6 +13,7 @@ from ..core.client import ModelClient
 from ..core.exceptions import AuthenticationError, ModelError, ProviderError
 from ..core.message import ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount
+from ..core.stream_normalizer import OllamaStreamNormalizer
 from ..core.streaming import StreamChunk
 
 
@@ -44,46 +45,8 @@ class OllamaClient(ModelClient):
         self.provider_name = "ollama"
         self.api_key = api_key
 
-        # Streaming state
-        self._accumulated_content = ""
-
-    def _reset_stream_state(self):
-        """Reset streaming state for a new streaming session."""
-        self._accumulated_content = ""
-
-    def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
-        """Normalize Ollama streaming format to unified StreamChunk."""
-        content = ""
-        delta = ""
-        finish_reason = None
-
-        try:
-            if isinstance(chunk, dict):
-                if "message" in chunk:
-                    delta = chunk["message"].get("content", "")
-                    content = delta
-                if chunk.get("done", False):
-                    finish_reason = "stop"
-            elif hasattr(chunk, 'message'):
-                delta = chunk.message.get("content", "")
-                content = delta
-                if hasattr(chunk, 'done') and chunk.done:
-                    finish_reason = "stop"
-            else:
-                content = str(chunk) if chunk else ""
-                delta = content
-
-        except (AttributeError, TypeError):
-            content = str(chunk) if chunk else ""
-            delta = content
-
-        return StreamChunk(
-            content=content,
-            delta=delta,
-            finish_reason=finish_reason,
-            usage=None,
-            tool_calls=None
-        )
+        # Stream normalizer for unified streaming handling
+        self._stream_normalizer = OllamaStreamNormalizer()
 
     async def _image_url_to_base64(self, image_url: str) -> str:
         """Convert image URL to base64 data for Ollama."""
@@ -273,19 +236,14 @@ class OllamaClient(ModelClient):
                         raise ProviderError(f"Ollama API error {response.status}: {error_text}", provider="ollama")
 
                     # Reset stream state for new streaming session
-                    self._reset_stream_state()
+                    self._stream_normalizer.reset_state()
 
                     async for line in response.content:
                         if line:
                             try:
                                 chunk_data = json.loads(line.decode('utf-8'))
 
-                                normalized_chunk = self._normalize_stream_chunk(chunk_data)
-
-                                if normalized_chunk.delta:
-                                    self._accumulated_content += normalized_chunk.delta
-
-                                normalized_chunk.content = self._accumulated_content
+                                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk_data)
 
                                 yield normalized_chunk
 

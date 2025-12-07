@@ -19,47 +19,68 @@ from .plan_execute_orchestrator import PlanAndExecuteOrchestrator
 from .factory import ReActFactory
 from .events import EventBus, EventFactory
 
-# Core data structures (still needed)
-from .data import (
+# Enums
+from .enums import ReActEventType, StopReason, PlanExecuteEventType
+
+# Models
+from .models import (
     ReActStep,
     ReActResult,
-    ReActEvent,
-    ReActEventType,
-    # Plan & Execute structures
+    ToolCall,
+    ParseResult,
+    ReasoningContext,
     SubTask,
     Plan,
     PlanExecuteResult,
-    PlanExecuteEvent,
-    PlanExecuteEventType,
 )
-from .parser import ReActParser, ReActParsingError
-from .safety import StopCondition, StopReason, SafetyManager
+
+# Events
+from .react_events import ReActEvent, PlanExecuteEvent
+
+# Exceptions
+from .exceptions import ReActParsingError, ReActExecutionError, SafetyViolationError
+
+# Parser and safety
+from .parser import ReActParser
+from .safety import StopCondition, SafetyManager
+
+# Execution state
+from .execution import ExecutionState
 
 __all__ = [
     # Main interfaces
     "ReActOrchestrator",
     "PlanAndExecuteOrchestrator",
     "ReActFactory",
-    # Clean event system
+    # Event system
     "EventBus",
     "EventFactory",
-    # ReAct data structures
+    # Enums
+    "ReActEventType",
+    "StopReason",
+    "PlanExecuteEventType",
+    # Models
     "ReActStep",
     "ReActResult",
-    "ReActEvent",
-    "ReActEventType",
-    # Plan & Execute data structures
+    "ToolCall",
+    "ParseResult",
+    "ReasoningContext",
     "SubTask",
     "Plan",
     "PlanExecuteResult",
+    # Events
+    "ReActEvent",
     "PlanExecuteEvent",
-    "PlanExecuteEventType",
+    # Exceptions
+    "ReActParsingError",
+    "ReActExecutionError",
+    "SafetyViolationError",
     # Parser and safety
     "ReActParser",
-    "ReActParsingError",
     "StopCondition",
-    "StopReason",
     "SafetyManager",
+    # Execution state
+    "ExecutionState",
 ]
 
-__version__ = "0.3.0"  # Added Plan and Execute orchestrator
+__version__ = "0.4.1"  # Added execution module

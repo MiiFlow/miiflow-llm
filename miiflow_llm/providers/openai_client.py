@@ -13,6 +13,7 @@ from ..core.exceptions import AuthenticationError, ModelError, ProviderError, Ra
 from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount, UsageData
+from ..core.stream_normalizer import OpenAIStreamNormalizer
 from ..core.streaming import StreamChunk
 from ..models.openai import get_token_param_name, supports_temperature
 
@@ -24,102 +25,7 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized[:64]  # OpenAI has a 64 char limit for function names
 
 
-class OpenAIStreaming:
-    """Mixin for OpenAI-compatible streaming format normalization."""
-
-    def _reset_stream_state(self):
-        """Reset streaming state for a new streaming session."""
-        self._accumulated_content = ""
-        self._accumulated_tool_calls = {}  # index -> {id, type, function: {name, arguments}}
-
-    def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
-        """Normalize OpenAI streaming format to unified StreamChunk."""
-        delta = ""
-        finish_reason = None
-        tool_calls = None
-        usage = None
-
-        try:
-            if hasattr(chunk, "choices") and chunk.choices:
-                choice = chunk.choices[0]
-
-                if hasattr(choice, "delta") and choice.delta:
-                    # Handle text content
-                    if hasattr(choice.delta, "content") and choice.delta.content:
-                        delta = choice.delta.content
-                        self._accumulated_content += delta
-
-                    # Handle tool call deltas - convert to standard dict format
-                    if hasattr(choice.delta, "tool_calls") and choice.delta.tool_calls:
-                        normalized_tool_calls = []
-
-                        for tool_call_delta in choice.delta.tool_calls:
-                            idx = tool_call_delta.index if hasattr(tool_call_delta, "index") else 0
-
-                            # Initialize accumulator for this index
-                            if idx not in self._accumulated_tool_calls:
-                                self._accumulated_tool_calls[idx] = {
-                                    "id": None,
-                                    "type": "function",
-                                    "function": {"name": None, "arguments": ""},
-                                }
-
-                            # Update ID if present
-                            if hasattr(tool_call_delta, "id") and tool_call_delta.id:
-                                self._accumulated_tool_calls[idx]["id"] = tool_call_delta.id
-
-                            # Update function name and arguments
-                            if hasattr(tool_call_delta, "function") and tool_call_delta.function:
-                                if (
-                                    hasattr(tool_call_delta.function, "name")
-                                    and tool_call_delta.function.name
-                                ):
-                                    # Restore original name if it was sanitized
-                                    sanitized_name = tool_call_delta.function.name
-                                    original_name = OpenAIClient._tool_name_mapping.get(
-                                        sanitized_name, sanitized_name
-                                    )
-                                    self._accumulated_tool_calls[idx]["function"][
-                                        "name"
-                                    ] = original_name
-
-                                if (
-                                    hasattr(tool_call_delta.function, "arguments")
-                                    and tool_call_delta.function.arguments
-                                ):
-                                    self._accumulated_tool_calls[idx]["function"][
-                                        "arguments"
-                                    ] += tool_call_delta.function.arguments
-
-                            # Emit the current state as a dict
-                            normalized_tool_calls.append(self._accumulated_tool_calls[idx].copy())
-
-                        tool_calls = normalized_tool_calls
-
-                if hasattr(choice, "finish_reason"):
-                    finish_reason = choice.finish_reason
-
-            if hasattr(chunk, "usage") and chunk.usage:
-                usage = TokenCount(
-                    prompt_tokens=chunk.usage.prompt_tokens,
-                    completion_tokens=chunk.usage.completion_tokens,
-                    total_tokens=chunk.usage.total_tokens,
-                )
-
-        except AttributeError:
-            delta = str(chunk) if chunk else ""
-            self._accumulated_content += delta
-
-        return StreamChunk(
-            content=self._accumulated_content,
-            delta=delta,
-            finish_reason=finish_reason,
-            usage=usage,
-            tool_calls=tool_calls,
-        )
-
-
-class OpenAIClient(OpenAIStreaming, ModelClient):
+class OpenAIClient(ModelClient):
     """OpenAI provider client."""
 
     # Class-level mapping shared across instances for tool name resolution
@@ -131,9 +37,9 @@ class OpenAIClient(OpenAIStreaming, ModelClient):
         self.client = openai.AsyncOpenAI(api_key=api_key)
         self.provider_name = "openai"
 
-        # Initialize streaming state
-        self._accumulated_content = ""
-        self._accumulated_tool_calls = {}
+        # Stream normalizer for unified streaming handling
+        # Note: Pass class-level mapping for tool name restoration
+        self._stream_normalizer = OpenAIStreamNormalizer(OpenAIClient._tool_name_mapping)
 
     def _clean_json_schema(self, obj: Any) -> None:
         if not isinstance(obj, dict):
@@ -392,13 +298,13 @@ class OpenAIClient(OpenAIStreaming, ModelClient):
             )
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             async for chunk in stream:
                 if not chunk.choices:
                     continue
 
-                normalized_chunk = self._normalize_stream_chunk(chunk)
+                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
                 # Only yield if there's content or metadata
                 if (

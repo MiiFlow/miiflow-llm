@@ -7,8 +7,10 @@ from typing import Any, Dict, Optional
 
 from ..agent import RunContext
 from ..message import Message, MessageRole
-from .data import ReActResult, ReActStep, StopReason
+from .enums import StopReason
 from .events import EventBus, EventFactory
+from .execution import ExecutionState
+from .models import ReActResult, ReActStep
 from .parsing.xml_parser import XMLReActParser
 from .safety import SafetyManager
 from .tool_executor import AgentToolExecutor
@@ -159,7 +161,7 @@ class ReActOrchestrator:
 
         # Native tool calling: tools are sent via API's tools parameter,
         # so we don't need to include them in the system prompt
-        from .data import REACT_NATIVE_SYSTEM_PROMPT
+        from .prompts import REACT_NATIVE_SYSTEM_PROMPT
 
         system_prompt = REACT_NATIVE_SYSTEM_PROMPT
 
@@ -913,14 +915,3 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
     def get_current_status(self) -> Dict[str, Any]:
         """Get current execution status."""
         return {"agent_type": "react_orchestrator"}
-
-
-class ExecutionState:
-    """Simple state container for execution tracking."""
-
-    def __init__(self):
-        self.current_step = 0
-        self.steps = []
-        self.start_time = time.time()
-        self.is_running = True
-        self.final_answer = None

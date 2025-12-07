@@ -5,6 +5,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 try:
     from openai import AsyncOpenAI
+
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
@@ -13,10 +14,11 @@ from ..core.client import ModelClient
 from ..core.exceptions import AuthenticationError, ModelError, ProviderError
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount
-from .openai_client import OpenAIClient, OpenAIStreaming
+from ..core.stream_normalizer import OpenAIStreamNormalizer
+from .openai_client import OpenAIClient
 
 
-class OpenRouterClient(OpenAIStreaming, ModelClient):
+class OpenRouterClient(ModelClient):
     """OpenRouter client implementation using OpenAI-compatible API."""
 
     def __init__(
@@ -27,12 +29,10 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
         max_retries: int = 3,
         app_name: Optional[str] = None,
         app_url: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ):
         if not OPENAI_AVAILABLE:
-            raise ImportError(
-                "openai is required for OpenRouter. Install with: pip install openai"
-            )
+            raise ImportError("openai is required for OpenRouter. Install with: pip install openai")
 
         if not api_key:
             raise AuthenticationError("OpenRouter API key is required", provider="openrouter")
@@ -43,11 +43,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
             headers["X-Title"] = app_name
 
         super().__init__(
-            model=model,
-            api_key=api_key,
-            timeout=timeout,
-            max_retries=max_retries,
-            **kwargs
+            model=model, api_key=api_key, timeout=timeout, max_retries=max_retries, **kwargs
         )
 
         self.client = AsyncOpenAI(
@@ -55,14 +51,14 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
             base_url="https://openrouter.ai/api/v1",
             timeout=timeout,
             max_retries=max_retries,
-            default_headers=headers
+            default_headers=headers,
         )
         self.provider_name = "openrouter"
 
-        # Initialize streaming state
-        self._accumulated_content = ""
-        self._accumulated_tool_calls = {}
-    
+        # Stream normalizer for unified streaming handling
+        # Note: Pass OpenAI's class-level mapping for tool name restoration
+        self._stream_normalizer = OpenAIStreamNormalizer(OpenAIClient._tool_name_mapping)
+
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to OpenRouter format (OpenAI compatible)."""
         return OpenAIClient.convert_schema_to_openai_format(schema)
@@ -80,7 +76,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
             openai_messages.append(openai_message)
 
         return openai_messages
-    
+
     async def achat(
         self,
         messages: List[Message],
@@ -88,7 +84,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         json_schema: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ):
         """Send chat completion request to OpenRouter."""
         try:
@@ -99,7 +95,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
                 "messages": openai_messages,
                 "temperature": temperature,
                 "stream": False,
-                **kwargs
+                **kwargs,
             }
 
             if max_tokens:
@@ -113,42 +109,40 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
             if json_schema:
                 request_params["response_format"] = {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "response_schema",
-                        "schema": json_schema
-                    }
+                    "json_schema": {"name": "response_schema", "schema": json_schema},
                 }
-            
+
             response = await self.client.chat.completions.create(**request_params)
-            
+
             content = response.choices[0].message.content or ""
-            
+
             usage = TokenCount()
             if response.usage:
                 usage = TokenCount(
                     prompt_tokens=response.usage.prompt_tokens,
                     completion_tokens=response.usage.completion_tokens,
-                    total_tokens=response.usage.total_tokens
+                    total_tokens=response.usage.total_tokens,
                 )
-            
+
             response_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=content,
-                tool_calls=response.choices[0].message.tool_calls
+                tool_calls=response.choices[0].message.tool_calls,
             )
-            
+
             from ..core.client import ChatResponse
+
             return ChatResponse(
                 message=response_message,
                 usage=usage,
                 model=self.model,
                 provider=self.provider_name,
-                finish_reason=response.choices[0].finish_reason
+                finish_reason=response.choices[0].finish_reason,
             )
-            
+
         except Exception as e:
             raise ProviderError(f"OpenRouter API error: {e}", provider="openrouter")
-    
+
     async def astream_chat(
         self,
         messages: List[Message],
@@ -156,7 +150,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         json_schema: Optional[Dict[str, Any]] = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncIterator:
         """Send streaming chat completion request to OpenRouter."""
         try:
@@ -167,7 +161,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
                 "messages": openai_messages,
                 "temperature": temperature,
                 "stream": True,
-                **kwargs
+                **kwargs,
             }
 
             if max_tokens:
@@ -181,19 +175,16 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
             if json_schema:
                 request_params["response_format"] = {
                     "type": "json_schema",
-                    "json_schema": {
-                        "name": "response_schema",
-                        "schema": json_schema
-                    }
+                    "json_schema": {"name": "response_schema", "schema": json_schema},
                 }
-            
+
             response_stream = await self.client.chat.completions.create(**request_params)
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             async for chunk in response_stream:
-                normalized_chunk = self._normalize_stream_chunk(chunk)
+                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
                 # Only yield if there's content or metadata
                 if (
@@ -202,7 +193,7 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
                     or normalized_chunk.finish_reason
                 ):
                     yield normalized_chunk
-            
+
         except Exception as e:
             raise ProviderError(f"OpenRouter streaming error: {e}", provider="openrouter")
 
@@ -211,34 +202,28 @@ class OpenRouterClient(OpenAIStreaming, ModelClient):
 OPENROUTER_MODELS = {
     # OpenAI models via OpenRouter
     "openai/gpt-4o": "openai/gpt-4o",
-    "openai/gpt-4o-mini": "openai/gpt-4o-mini", 
+    "openai/gpt-4o-mini": "openai/gpt-4o-mini",
     "openai/gpt-4-turbo": "openai/gpt-4-turbo",
     "openai/o1-preview": "openai/o1-preview",
     "openai/o1-mini": "openai/o1-mini",
-    
     # Anthropic models via OpenRouter
     "anthropic/claude-3.5-sonnet": "anthropic/claude-3.5-sonnet",
     "anthropic/claude-3-haiku": "anthropic/claude-3-haiku",
     "anthropic/claude-3-opus": "anthropic/claude-3-opus",
-    
     # Google models via OpenRouter
     "google/gemini-pro-1.5": "google/gemini-pro-1.5",
     "google/gemini-flash-1.5": "google/gemini-flash-1.5",
-    
     # Meta Llama models
     "meta-llama/llama-3.1-405b-instruct": "meta-llama/llama-3.1-405b-instruct",
     "meta-llama/llama-3.1-70b-instruct": "meta-llama/llama-3.1-70b-instruct",
     "meta-llama/llama-3.1-8b-instruct": "meta-llama/llama-3.1-8b-instruct",
-    
     # Mistral models
     "mistralai/mixtral-8x7b-instruct": "mistralai/mixtral-8x7b-instruct",
     "mistralai/mistral-7b-instruct": "mistralai/mistral-7b-instruct",
-    
     # Other popular models
     "qwen/qwen-2.5-72b-instruct": "qwen/qwen-2.5-72b-instruct",
     "microsoft/wizardlm-2-8x22b": "microsoft/wizardlm-2-8x22b",
     "nvidia/llama-3.1-nemotron-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
-    
     # Free models (good for testing)
     "meta-llama/llama-3.2-3b-instruct:free": "meta-llama/llama-3.2-3b-instruct:free",
     "qwen/qwen-2-7b-instruct:free": "qwen/qwen-2-7b-instruct:free",

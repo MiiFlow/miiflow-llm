@@ -1,6 +1,7 @@
 """Google Gemini client implementation."""
 
 import asyncio
+import warnings
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 try:
@@ -16,10 +17,23 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+# Suppress warnings about unrecognized FinishReason enum values from proto-plus.
+# Gemini 2.5 models return new enum values (like 12, 15) that aren't yet in the
+# google-generativeai SDK's protobuf definitions. Our code handles these gracefully
+# via _get_finish_reason_name(), so the warnings are just noise.
+# See: https://github.com/langchain-ai/langchain-google/issues/1268
+warnings.filterwarnings(
+    "ignore",
+    message=r"Unrecognized FinishReason enum value: \d+",
+    category=UserWarning,
+    module=r"proto\.marshal\.rules\.enums",
+)
+
 from ..core.client import ModelClient
 from ..core.exceptions import AuthenticationError, ModelError, ProviderError
 from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount
+from ..core.stream_normalizer import GeminiStreamNormalizer
 from ..core.streaming import StreamChunk
 from ..utils.image import image_url_to_bytes
 
@@ -65,12 +79,8 @@ class GeminiClient(ModelClient):
 
         self.provider_name = "gemini"
 
-        # Streaming state
-        self._accumulated_content = ""
-
-    def _reset_stream_state(self):
-        """Reset streaming state for a new streaming session."""
-        self._accumulated_content = ""
+        # Stream normalizer for unified streaming handling
+        self._stream_normalizer = GeminiStreamNormalizer()
 
     def _get_finish_reason_name(self, finish_reason: Any) -> Optional[str]:
         """Safely extract finish_reason name, handling both enum and int values.
@@ -88,44 +98,6 @@ class GeminiClient(ModelClient):
             return f"UNKNOWN_{finish_reason}"
         # Fallback: convert to string
         return str(finish_reason)
-
-    def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
-        """Normalize Gemini streaming format to unified StreamChunk."""
-        content = ""
-        delta = ""
-        finish_reason = None
-        usage = None
-
-        try:
-            if hasattr(chunk, "candidates") and chunk.candidates:
-                candidate = chunk.candidates[0]
-
-                if hasattr(candidate, "content") and candidate.content.parts:
-                    delta = candidate.content.parts[0].text
-                    content = delta
-
-                if hasattr(candidate, "finish_reason") and candidate.finish_reason:
-                    finish_reason = self._get_finish_reason_name(candidate.finish_reason)
-
-            if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
-                usage = TokenCount(
-                    prompt_tokens=getattr(chunk.usage_metadata, "prompt_token_count", 0) or 0,
-                    completion_tokens=getattr(chunk.usage_metadata, "candidates_token_count", 0)
-                    or 0,
-                    total_tokens=getattr(chunk.usage_metadata, "total_token_count", 0) or 0,
-                )
-
-        except AttributeError:
-            if hasattr(chunk, "text"):
-                content = chunk.text
-                delta = content
-            else:
-                content = str(chunk) if chunk else ""
-                delta = content
-
-        return StreamChunk(
-            content=content, delta=delta, finish_reason=finish_reason, usage=usage, tool_calls=None
-        )
 
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to Gemini format."""
@@ -663,15 +635,10 @@ class GeminiClient(ModelClient):
             )
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             for chunk in response_stream:
-                normalized_chunk = self._normalize_stream_chunk(chunk)
-
-                if normalized_chunk.delta:
-                    self._accumulated_content += normalized_chunk.delta
-
-                normalized_chunk.content = self._accumulated_content
+                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
                 yield normalized_chunk
 

@@ -7,7 +7,7 @@ Tests the complete flow from parser to orchestrator to ensure XML parsing works 
 import asyncio
 from miiflow_llm.core.react.parsing.xml_parser import XMLReActParser, ParseEventType
 from miiflow_llm.core.react.parser import ReActParser
-from miiflow_llm.core.react.data import REACT_SYSTEM_PROMPT
+from miiflow_llm.core.react.prompts import REACT_SYSTEM_PROMPT
 
 
 def test_xml_parser():

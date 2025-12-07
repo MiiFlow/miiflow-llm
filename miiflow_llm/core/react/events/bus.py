@@ -4,7 +4,9 @@ import logging
 from typing import List, Optional, Callable, Any
 from dataclasses import dataclass
 
-from ..data import ReActEvent, ReActEventType, ReActStep
+from ..enums import ReActEventType
+from ..models import ReActStep
+from ..react_events import ReActEvent
 
 logger = logging.getLogger(__name__)
 

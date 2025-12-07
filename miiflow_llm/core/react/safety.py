@@ -5,7 +5,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
-from .data import ReActStep, StopReason
+from .enums import StopReason
+from .models import ReActStep
 
 
 def make_hashable(obj: Any) -> Any:

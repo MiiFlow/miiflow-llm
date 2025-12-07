@@ -8,17 +8,10 @@ from typing import Any, Dict, Optional
 
 from ..agent import RunContext
 from ..message import Message, MessageRole
-from .data import (
-    PLAN_AND_EXECUTE_PLANNING_PROMPT,
-    PLAN_AND_EXECUTE_REPLAN_PROMPT,
-    Plan,
-    PlanExecuteEvent,
-    PlanExecuteEventType,
-    PlanExecuteResult,
-    ReActEventType,
-    StopReason,
-    SubTask,
-)
+from .enums import PlanExecuteEventType, ReActEventType, StopReason
+from .models import Plan, PlanExecuteResult, SubTask
+from .prompts import PLAN_AND_EXECUTE_PLANNING_PROMPT, PLAN_AND_EXECUTE_REPLAN_PROMPT
+from .react_events import PlanExecuteEvent
 from .events import EventBus
 from .orchestrator import ReActOrchestrator
 from .safety import SafetyManager
@@ -221,7 +214,7 @@ class PlanAndExecuteOrchestrator:
         Returns:
             Plan with subtasks
         """
-        from .data import PLANNING_WITH_TOOL_SYSTEM_PROMPT, create_plan_tool
+        from .prompts import PLANNING_WITH_TOOL_SYSTEM_PROMPT, create_plan_tool
         from .parsing.xml_parser import XMLReActParser, ParseEventType
 
         await self._publish_event(PlanExecuteEventType.PLANNING_START, {"goal": query})

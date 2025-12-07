@@ -9,6 +9,7 @@ from ..core.client import ModelClient
 from ..core.exceptions import AuthenticationError, ModelError, ProviderError
 from ..core.message import ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount
+from ..core.stream_normalizer import MistralStreamNormalizer
 from ..core.streaming import StreamChunk
 
 
@@ -37,53 +38,8 @@ class MistralClient(ModelClient):
         self.client = Mistral(api_key=api_key)
         self.provider_name = "mistral"
 
-        # Streaming state
-        self._accumulated_content = ""
-
-    def _reset_stream_state(self):
-        """Reset streaming state for a new streaming session."""
-        self._accumulated_content = ""
-
-    def _normalize_stream_chunk(self, chunk: Any) -> StreamChunk:
-        """Normalize Mistral streaming format to unified StreamChunk."""
-        content = ""
-        delta = ""
-        finish_reason = None
-        tool_calls = None
-        usage = None
-
-        try:
-            if hasattr(chunk, 'choices') and chunk.choices:
-                choice = chunk.choices[0]
-
-                if hasattr(choice, 'delta') and choice.delta:
-                    if hasattr(choice.delta, 'content'):
-                        delta = choice.delta.content or ""
-                        content = delta
-                    if hasattr(choice.delta, 'tool_calls'):
-                        tool_calls = choice.delta.tool_calls
-
-                if hasattr(choice, 'finish_reason'):
-                    finish_reason = choice.finish_reason
-
-            if hasattr(chunk, 'usage') and chunk.usage:
-                usage = TokenCount(
-                    prompt_tokens=chunk.usage.prompt_tokens,
-                    completion_tokens=chunk.usage.completion_tokens,
-                    total_tokens=chunk.usage.total_tokens
-                )
-
-        except AttributeError:
-            content = str(chunk) if chunk else ""
-            delta = content
-
-        return StreamChunk(
-            content=content,
-            delta=delta,
-            finish_reason=finish_reason,
-            usage=usage,
-            tool_calls=tool_calls
-        )
+        # Stream normalizer for unified streaming handling
+        self._stream_normalizer = MistralStreamNormalizer()
     
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to Mistral format (OpenAI compatible)."""
@@ -248,18 +204,11 @@ class MistralClient(ModelClient):
             response_stream = await self.client.chat.stream_async(**request_params)
 
             # Reset stream state for new streaming session
-            self._reset_stream_state()
+            self._stream_normalizer.reset_state()
 
             async for chunk in response_stream:
                 # Normalize Mistral format to unified format
-                normalized_chunk = self._normalize_stream_chunk(chunk)
-
-                # Accumulate content
-                if normalized_chunk.delta:
-                    self._accumulated_content += normalized_chunk.delta
-
-                # Update accumulated content in the chunk
-                normalized_chunk.content = self._accumulated_content
+                normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
                 yield normalized_chunk
             

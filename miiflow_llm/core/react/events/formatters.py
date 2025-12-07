@@ -6,7 +6,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, AsyncIterator
 from enum import Enum
 
-from ..data import ReActEvent, ReActEventType
+from ..enums import ReActEventType
+from ..react_events import ReActEvent
 
 
 class LogLevel(Enum):

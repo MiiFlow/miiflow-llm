@@ -8,14 +8,9 @@ from typing import List
 
 from miiflow_llm import RunContext
 from miiflow_llm.core.react.events import EventBus, EventFactory
-from miiflow_llm.core.react.data import (
-    ReActEvent,
-    ReActEventType,
-    ReActStep,
-    PlanExecuteEvent,
-    PlanExecuteEventType,
-    StopReason,
-)
+from miiflow_llm.core.react.enums import ReActEventType, PlanExecuteEventType, StopReason
+from miiflow_llm.core.react.models import ReActStep
+from miiflow_llm.core.react.react_events import ReActEvent, PlanExecuteEvent
 
 
 class TestEventFactory:

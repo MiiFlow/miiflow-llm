@@ -6,7 +6,7 @@ This module provides backward compatibility while delegating to the XML parser.
 import logging
 from typing import Any, Dict
 
-from .data import ParseResult
+from .models import ParseResult
 from .parsing.xml_parser import XMLReActParser
 
 logger = logging.getLogger(__name__)
