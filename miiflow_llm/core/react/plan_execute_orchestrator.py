@@ -10,7 +10,7 @@ from ..agent import RunContext
 from ..message import Message, MessageRole
 from .enums import PlanExecuteEventType, ReActEventType, StopReason
 from .models import Plan, PlanExecuteResult, SubTask
-from .prompts import PLAN_AND_EXECUTE_PLANNING_PROMPT, PLAN_AND_EXECUTE_REPLAN_PROMPT
+from .prompts import PLAN_AND_EXECUTE_REPLAN_PROMPT, SUBTASK_EXECUTION_PROMPT
 from .react_events import PlanExecuteEvent
 from .events import EventBus
 from .orchestrator import ReActOrchestrator
@@ -497,9 +497,18 @@ class PlanAndExecuteOrchestrator:
                 subtask.error = "Dependencies not satisfied"
                 continue
 
+            # Get remaining subtask descriptions for boundary enforcement
+            remaining_descriptions = [
+                st.description for st in plan.subtasks
+                if st.id > subtask.id and st.status == "pending"
+            ]
+
             # Execute subtask (pass total count to conditionally show subtask headers)
             success = await self._execute_subtask(
-                subtask, context, total_subtasks=len(plan.subtasks)
+                subtask,
+                context,
+                total_subtasks=len(plan.subtasks),
+                remaining_subtasks=remaining_descriptions,
             )
 
             if success:
@@ -522,7 +531,11 @@ class PlanAndExecuteOrchestrator:
         return True
 
     async def _execute_subtask(
-        self, subtask: SubTask, context: RunContext, total_subtasks: int = 1
+        self,
+        subtask: SubTask,
+        context: RunContext,
+        total_subtasks: int = 1,
+        remaining_subtasks: Optional[list] = None,
     ) -> bool:
         """Execute a single subtask.
 
@@ -530,6 +543,7 @@ class PlanAndExecuteOrchestrator:
             subtask: Subtask to execute
             context: Run context
             total_subtasks: Total number of subtasks in the plan (for conditional rendering)
+            remaining_subtasks: Descriptions of upcoming subtasks (for boundary enforcement)
 
         Returns:
             True if successful, False otherwise
@@ -549,6 +563,31 @@ class PlanAndExecuteOrchestrator:
             if self.use_react_for_subtasks and self.subtask_orchestrator:
                 # Use ReAct orchestrator for complex subtasks with event streaming
                 logger.info(f"Executing subtask {subtask.id} with ReAct: {subtask.description}")
+
+                # Build boundary-aware prompt for multi-step plans
+                if total_subtasks > 1 and remaining_subtasks:
+                    # Warn about upcoming steps to avoid (show max 3)
+                    remaining_warning = "\nDo NOT perform these upcoming steps:\n" + "\n".join(
+                        f"- {desc}" for desc in remaining_subtasks[:3]
+                    )
+
+                    scoped_query = SUBTASK_EXECUTION_PROMPT.format(
+                        subtask_number=subtask.id,
+                        total_subtasks=total_subtasks,
+                        subtask_description=subtask.description,
+                        remaining_steps_warning=remaining_warning,
+                    )
+                elif total_subtasks > 1:
+                    # Multi-step plan but this is the last step
+                    scoped_query = SUBTASK_EXECUTION_PROMPT.format(
+                        subtask_number=subtask.id,
+                        total_subtasks=total_subtasks,
+                        subtask_description=subtask.description,
+                        remaining_steps_warning="",
+                    )
+                else:
+                    # Single subtask plan - no boundary needed
+                    scoped_query = subtask.description
 
                 # Create event forwarder to bubble up ReAct events as PlanExecute events
                 def forward_react_event(react_event):
@@ -622,8 +661,8 @@ class PlanAndExecuteOrchestrator:
                 self.subtask_orchestrator.event_bus.subscribe(forward_react_event)
 
                 try:
-                    # Execute subtask - events will be forwarded automatically
-                    result = await self.subtask_orchestrator.execute(subtask.description, context)
+                    # Execute subtask with scoped query - events will be forwarded automatically
+                    result = await self.subtask_orchestrator.execute(scoped_query, context)
 
                     subtask.result = result.final_answer
                     subtask.cost = result.total_cost

@@ -7,7 +7,7 @@ Tests the complete flow from parser to orchestrator to ensure XML parsing works 
 import asyncio
 from miiflow_llm.core.react.parsing.xml_parser import XMLReActParser, ParseEventType
 from miiflow_llm.core.react.parser import ReActParser
-from miiflow_llm.core.react.prompts import REACT_SYSTEM_PROMPT
+from miiflow_llm.core.react.prompts import REACT_NATIVE_SYSTEM_PROMPT
 
 
 def test_xml_parser():
@@ -138,25 +138,23 @@ Testing the wrapper
 def test_system_prompt():
     """Test that system prompt uses XML format."""
     print("=" * 80)
-    print("TEST 4: System Prompt Format")
+    print("TEST 4: System Prompt Format (Native Tool Calling)")
     print("=" * 80)
 
-    # Check for XML tags
-    assert "<thinking>" in REACT_SYSTEM_PROMPT
-    assert "</thinking>" in REACT_SYSTEM_PROMPT
-    assert "<tool_call" in REACT_SYSTEM_PROMPT
-    assert "</tool_call>" in REACT_SYSTEM_PROMPT
-    assert "<answer>" in REACT_SYSTEM_PROMPT
-    assert "</answer>" in REACT_SYSTEM_PROMPT
-    print("✓ System prompt uses XML tags")
+    # Check for XML tags in native system prompt
+    assert "<thinking>" in REACT_NATIVE_SYSTEM_PROMPT
+    assert "</thinking>" in REACT_NATIVE_SYSTEM_PROMPT
+    assert "<answer>" in REACT_NATIVE_SYSTEM_PROMPT
+    assert "</answer>" in REACT_NATIVE_SYSTEM_PROMPT
+    print("✓ Native system prompt uses XML thinking/answer tags")
 
     # Check it doesn't contain JSON artifacts
-    assert 'REACT_RESPONSE_SCHEMA' not in REACT_SYSTEM_PROMPT
-    assert '"action_type"' not in REACT_SYSTEM_PROMPT
+    assert 'REACT_RESPONSE_SCHEMA' not in REACT_NATIVE_SYSTEM_PROMPT
+    assert '"action_type"' not in REACT_NATIVE_SYSTEM_PROMPT
     print("✓ No JSON artifacts in system prompt")
 
     # Show a snippet
-    lines = REACT_SYSTEM_PROMPT.split('\n')
+    lines = REACT_NATIVE_SYSTEM_PROMPT.split('\n')
     print(f"\nPrompt snippet (first 5 lines):")
     for line in lines[:5]:
         print(f"  {line}")
