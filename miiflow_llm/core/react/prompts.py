@@ -94,7 +94,7 @@ Current Plan Status:
 
 Failed Subtask: {failed_subtask}
 Error: {error}
-
+{completed_context}
 Your task: Create a revised plan that addresses the failure and completes the goal.
 
 Respond with a new JSON plan in the same format as before:
@@ -105,7 +105,7 @@ Respond with a new JSON plan in the same format as before:
 
 Guidelines for replanning:
 1. **Learn from failure**: Address the specific error that occurred
-2. **Keep successful work**: Don't redo subtasks that already completed successfully
+2. **Build on completed work**: Use results from completed subtasks (shown above) without re-executing them
 3. **Adjust approach**: Try different tools or methods if previous ones failed
 4. **Simplify if needed**: Break down failed subtasks into smaller steps
 5. **Add validation**: Include verification subtasks if data issues occurred

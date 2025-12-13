@@ -38,6 +38,7 @@ class PlanExecuteEventType(Enum):
     PLANNING_THINKING_CHUNK = "planning_thinking_chunk"  # LLM reasoning during planning
     PLANNING_COMPLETE = "planning_complete"
     REPLANNING_START = "replanning_start"
+    REPLANNING_THINKING_CHUNK = "replanning_thinking_chunk"  # Streaming during replanning
     REPLANNING_COMPLETE = "replanning_complete"
 
     SUBTASK_START = "subtask_start"
@@ -47,6 +48,7 @@ class PlanExecuteEventType(Enum):
     SUBTASK_FAILED = "subtask_failed"
 
     PLAN_PROGRESS = "plan_progress"  # Overall plan progress update
+    SYNTHESIS_START = "synthesis_start"  # Starting final answer synthesis
     FINAL_ANSWER = "final_answer"
     FINAL_ANSWER_CHUNK = "final_answer_chunk"  # Streaming chunks for final answer
     ERROR = "error"

@@ -17,6 +17,8 @@ _REASONING_MODELS = {
 _GPT5_MODELS = {
     "gpt-5",
     "gpt-5.1",
+    "gpt-5.2",
+    "gpt-5.2-pro",
     "gpt-5-mini",
     "gpt-5-nano",
 }
@@ -27,10 +29,46 @@ _NO_TEMPERATURE_MODELS = _REASONING_MODELS | _GPT5_MODELS
 
 OPENAI_MODELS: Dict[str, ModelConfig] = {
     # GPT-5 series (reasoning, use max_completion_tokens)
+    # GPT-5.2 series (released December 2025)
+    "gpt-5.2": ModelConfig(
+        model_identifier="gpt-5.2",
+        name="gpt-5.2",
+        description="GPT-5.2 is OpenAI's flagship model with 400K context window, optimized for coding and agentic tasks.",
+        support_images=True,
+        support_files=True,
+        support_streaming=True,
+        supports_json_mode=True,
+        supports_tool_call=True,
+        reasoning=True,
+        maximum_context_tokens=400000,
+        maximum_output_tokens=128000,
+        token_param_name="max_completion_tokens",
+        supports_temperature=False,
+        input_cost_hint=1.75,
+        output_cost_hint=14.0,
+    ),
+    "gpt-5.2-pro": ModelConfig(
+        model_identifier="gpt-5.2-pro",
+        name="gpt-5.2-pro",
+        description="GPT-5.2 Pro is OpenAI's highest-accuracy model for critical tasks, exceeding 90% on ARC-AGI-1 benchmark.",
+        support_images=True,
+        support_files=True,
+        support_streaming=True,
+        supports_json_mode=True,
+        supports_tool_call=True,
+        reasoning=True,
+        maximum_context_tokens=400000,
+        maximum_output_tokens=128000,
+        token_param_name="max_completion_tokens",
+        supports_temperature=False,
+        input_cost_hint=21.0,
+        output_cost_hint=168.0,
+    ),
+    # GPT-5.1 series
     "gpt-5.1": ModelConfig(
         model_identifier="gpt-5.1",
         name="gpt-5.1",
-        description="GPT-5.1 is OpenAI's latest model with improved conversational quality and instruction-following.",
+        description="GPT-5.1 offers improved conversational quality and instruction-following with 272K context.",
         support_images=True,
         support_files=True,
         support_streaming=True,
@@ -342,6 +380,8 @@ OPENAI_PARAMETERS: list[ParameterConfig] = [
         parameter_type=ParameterType.NUMBER,
         min_value=1,
         max_value={
+            "gpt-5.2": 128000,
+            "gpt-5.2-pro": 128000,
             "gpt-5.1": 128000,
             "gpt-5": 128000,
             "gpt-5-mini": 128000,
@@ -416,7 +456,7 @@ def get_token_param_name(model: str) -> str:
     if model_lower in OPENAI_MODELS:
         return OPENAI_MODELS[model_lower].token_param_name
 
-    # Check prefix for versioned models (e.g., "o1-2024-12-17", "gpt-5-turbo")
+    # Check prefix for versioned models (e.g., "o1-2024-12-17", "gpt-5.2-turbo")
     for prefix in ("o1", "o3", "o4", "gpt-5"):
         if model_lower.startswith(prefix):
             return "max_completion_tokens"

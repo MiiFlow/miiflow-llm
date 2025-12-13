@@ -13,6 +13,7 @@ from ..core.exceptions import AuthenticationError, ModelError, ProviderError, Ra
 from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import Message, MessageRole
 from ..core.metrics import TokenCount, UsageData
+from ..core.schema_normalizer import SchemaMode, normalize_json_schema
 from ..core.stream_normalizer import AnthropicStreamNormalizer
 from ..core.streaming import StreamChunk
 from ..models.anthropic import supports_structured_outputs
@@ -37,62 +38,6 @@ class AnthropicClient(ModelClient):
     def _supports_structured_outputs(self) -> bool:
         """Check if the current model supports native structured outputs."""
         return supports_structured_outputs(self.model)
-
-    def _loosen_json_schema(self, obj: Any) -> Any:
-        """Remove strict schema constraints for better Anthropic model compliance."""
-        if not isinstance(obj, dict):
-            return obj
-
-        obj = obj.copy()
-
-        if obj.get("type") == "object" and "additionalProperties" in obj:
-            obj["additionalProperties"] = True
-
-        if "properties" in obj:
-            obj["properties"] = {
-                k: self._loosen_json_schema(v) for k, v in obj["properties"].items()
-            }
-
-        if "items" in obj:
-            obj["items"] = self._loosen_json_schema(obj["items"])
-
-        for key in ["allOf", "anyOf", "oneOf"]:
-            if key in obj:
-                obj[key] = [self._loosen_json_schema(item) for item in obj[key]]
-
-        return obj
-
-    def _prepare_json_schema_for_structured_output(self, obj: Any) -> Any:
-        """Prepare JSON schema for native structured output API.
-
-        Anthropic requires 'additionalProperties: false' on all object types.
-        """
-        if not isinstance(obj, dict):
-            return obj
-
-        obj = obj.copy()
-
-        # For object types, ensure additionalProperties is explicitly set to false
-        if obj.get("type") == "object":
-            obj["additionalProperties"] = False
-
-        # Recursively process nested schemas
-        if "properties" in obj:
-            obj["properties"] = {
-                k: self._prepare_json_schema_for_structured_output(v)
-                for k, v in obj["properties"].items()
-            }
-
-        if "items" in obj:
-            obj["items"] = self._prepare_json_schema_for_structured_output(obj["items"])
-
-        for key in ["allOf", "anyOf", "oneOf"]:
-            if key in obj:
-                obj[key] = [
-                    self._prepare_json_schema_for_structured_output(item) for item in obj[key]
-                ]
-
-        return obj
 
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to Anthropic format with loosened constraints.
@@ -120,9 +65,9 @@ class AnthropicClient(ModelClient):
             "name": sanitized_name,
             "description": schema["description"],
             "input_schema": (
-                schema["parameters"]
+                normalize_json_schema(schema["parameters"], SchemaMode.NATIVE_STRICT)
                 if use_strict
-                else self._loosen_json_schema(schema["parameters"])
+                else normalize_json_schema(schema["parameters"], SchemaMode.LOOSE)
             ),
         }
 
@@ -304,7 +249,7 @@ class AnthropicClient(ModelClient):
                 if use_native_structured_output:
                     # Use native structured output API (beta feature)
                     # Prepare schema by ensuring additionalProperties is set
-                    prepared_schema = self._prepare_json_schema_for_structured_output(json_schema)
+                    prepared_schema = normalize_json_schema(json_schema, SchemaMode.NATIVE_STRICT)
 
                     request_params = {
                         "model": self.model,
@@ -493,7 +438,7 @@ class AnthropicClient(ModelClient):
                 if use_native_structured_output:
                     # Use native structured output API (beta feature) - streaming supported!
                     # Prepare schema by ensuring additionalProperties is set
-                    prepared_schema = self._prepare_json_schema_for_structured_output(json_schema)
+                    prepared_schema = normalize_json_schema(json_schema, SchemaMode.NATIVE_STRICT)
 
                     request_params = {
                         "model": self.model,

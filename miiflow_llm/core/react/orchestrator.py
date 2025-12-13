@@ -28,14 +28,14 @@ def _strip_xml_tags_from_answer(content: str) -> str:
         return content
 
     # Remove <thinking>...</thinking> blocks entirely
-    content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL | re.IGNORECASE)
 
     # Remove standalone opening/closing tags that might remain
-    content = re.sub(r'</?thinking>', '', content, flags=re.IGNORECASE)
-    content = re.sub(r'</?answer>', '', content, flags=re.IGNORECASE)
+    content = re.sub(r"</?thinking>", "", content, flags=re.IGNORECASE)
+    content = re.sub(r"</?answer>", "", content, flags=re.IGNORECASE)
 
     # Clean up extra whitespace from removed tags
-    content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+    content = re.sub(r"\n\s*\n\s*\n", "\n\n", content)
 
     return content.strip()
 
@@ -146,10 +146,7 @@ class ReActOrchestrator:
         # Check if there's at least a user message in context
         if not query or not query.strip():
             # Allow empty query if there's already a user message in context
-            has_user_message = any(
-                msg.role == MessageRole.USER
-                for msg in (context.messages or [])
-            )
+            has_user_message = any(msg.role == MessageRole.USER for msg in (context.messages or []))
             if not has_user_message:
                 raise ValueError("Query cannot be empty when no user message exists in context")
 
@@ -418,6 +415,12 @@ class ReActOrchestrator:
                     )
                     step.action_input = {}
 
+                # Extract __description from action_input (LLM-generated human-readable description)
+                # This is used for displaying "Searching for Tesla news" instead of "search_web"
+                tool_description = None
+                if isinstance(step.action_input, dict):
+                    tool_description = step.action_input.pop("__description", None)
+
                 # Validate tool name is not None or empty
                 if not step.action:
                     logger.warning(
@@ -475,7 +478,7 @@ class ReActOrchestrator:
 
                             # Execute the tool
                             await self._handle_tool_action(
-                                step, context, state, tool_call_id=tool_call_id
+                                step, context, state, tool_call_id=tool_call_id, tool_description=tool_description
                             )
                     else:
                         # No required parameters, safe to execute
@@ -491,7 +494,7 @@ class ReActOrchestrator:
 
                         # Execute the tool
                         await self._handle_tool_action(
-                            step, context, state, tool_call_id=tool_call_id
+                            step, context, state, tool_call_id=tool_call_id, tool_description=tool_description
                         )
                 else:
                     # action_input is None (shouldn't happen, but defensive)
@@ -687,17 +690,28 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
         context: RunContext,
         state: "ExecutionState",
         tool_call_id: Optional[str] = None,
+        tool_description: Optional[str] = None,
     ):
         """Handle tool action execution."""
         # step.action and step.action_input are already set from parsed data
 
-        # Publish action events
+        # Resolve tool name BEFORE emitting events to ensure consistency
+        # (fuzzy matching may correct LLM hallucinations)
+        if not self.tool_executor.has_tool(step.action):
+            corrected_name = self._find_similar_tool(step.action)
+            if corrected_name:
+                logger.warning(
+                    f"Tool '{step.action}' not found, auto-correcting to '{corrected_name}'"
+                )
+                step.action = corrected_name
+
+        # Publish action events with tool_description for human-readable display
         await self.event_bus.publish(
-            EventFactory.action_planned(state.current_step, step.action, step.action_input)
+            EventFactory.action_planned(state.current_step, step.action, step.action_input, tool_description)
         )
 
         await self.event_bus.publish(
-            EventFactory.action_executing(state.current_step, step.action, step.action_input)
+            EventFactory.action_executing(state.current_step, step.action, step.action_input, tool_description)
         )
 
         # Execute tool
@@ -746,19 +760,12 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
 
     async def _execute_tool(self, step: ReActStep, context: RunContext):
         """Execute tool with proper context injection."""
-        # Check if tool exists first
+        # Tool name should already be resolved by _handle_tool_action
+        # Just verify it exists (fuzzy matching was already done if needed)
         if not self.tool_executor.has_tool(step.action):
-            # Try fuzzy matching as fallback for common LLM hallucinations
-            corrected_name = self._find_similar_tool(step.action)
-            if corrected_name:
-                logger.warning(
-                    f"Tool '{step.action}' not found, auto-correcting to '{corrected_name}'"
-                )
-                step.action = corrected_name
-            else:
-                available_tools = self.tool_executor.list_tools()
-                step.error = f"Tool '{step.action}' not found. Available: {available_tools}"
-                raise Exception(step.error)
+            available_tools = self.tool_executor.list_tools()
+            step.error = f"Tool '{step.action}' not found. Available: {available_tools}"
+            raise Exception(step.error)
 
         if step.action_input is None:
             step.action_input = {}

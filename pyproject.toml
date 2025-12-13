@@ -1,8 +1,9 @@
 [tool.poetry]
 name = "miiflow-llm"
-version = "0.2.0"
+version = "0.3.0"
 description = "A lightweight, unified interface for LLM providers with streaming, tool calling, and structured output support"
-authors = ["Debjyoti Ray <dev@miiflow.ai>", "Yaozhong Kang <yaozhong@miiflow.ai>"]
+authors = [ "Yaozhong Kang <yaozhong@miiflow.ai>" , "Debjyoti Ray <dev@miiflow.ai>" ]
+maintainers = [ "Yaozhong Kang <yaozhong@miiflow.ai>" ]
 readme = "README.md"
 license = "MIT"
 homepage = "https://github.com/Miiflow/miiflow-llm"
@@ -45,6 +46,9 @@ PyMuPDF = { version = "^1.23.0", optional = true }
 # Optional example dependencies
 yfinance = { version = "^0.2.40", optional = true }
 
+# Optional MCP (Model Context Protocol) support
+mcp = { version = "^1.0.0", optional = true, python = ">=3.10" }
+
 # Optional observability dependencies
 opentelemetry-api = { version = "^1.27.0", optional = true }
 opentelemetry-sdk = { version = "^1.27.0", optional = true }
@@ -75,8 +79,9 @@ mistral = ["mistralai"]
 pdf = ["PyMuPDF"]
 multimedia = ["PyMuPDF"]
 examples = ["yfinance"]
+mcp = ["mcp"]
 observability = ["opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic", "openinference-instrumentation-google-genai"]
-all = ["groq", "google-generativeai", "mistralai", "PyMuPDF", "yfinance", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic", "openinference-instrumentation-google-genai"]
+all = ["groq", "google-generativeai", "mistralai", "PyMuPDF", "yfinance", "mcp", "opentelemetry-api", "opentelemetry-sdk", "opentelemetry-exporter-otlp", "prometheus-client", "arize-phoenix", "openinference-instrumentation-openai", "openinference-instrumentation-anthropic", "openinference-instrumentation-google-genai"]
 
 [build-system]
 requires = ["poetry-core"]

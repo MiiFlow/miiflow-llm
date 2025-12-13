@@ -32,6 +32,7 @@ from .tools import (
     detect_function_type,
     get_fun_schema
 )
+from .schema_normalizer import normalize_json_schema, SchemaMode
 from .agent import (
     # Core agent architecture - Stateless framework
     Agent,
@@ -135,6 +136,10 @@ __all__ = [
     "RunContext",
     "RunResult",
     "AgentType",
+
+    # Schema normalization
+    "normalize_json_schema",
+    "SchemaMode",
 
     # Observability (optional)
     "ObservabilityConfig",

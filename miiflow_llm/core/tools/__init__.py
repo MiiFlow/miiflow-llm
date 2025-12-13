@@ -30,6 +30,18 @@ from .registry import ToolRegistry
 from .function import FunctionTool
 from .http import HTTPTool
 
+# MCP (Model Context Protocol) support
+from .mcp import (
+    MCPTool,
+    MCPServerConfig,
+    MCPServerConnection,
+    StdioMCPConnection,
+    SSEMCPConnection,
+    StreamableHTTPMCPConnection,
+    MCPToolManager,
+    create_connection,
+)
+
 # Schemas and types
 from .schemas import (
     ParameterSchema,
@@ -61,7 +73,10 @@ from .exceptions import (
     ToolExecutionError,
     HTTPToolError,
     ProxyError,
-    ValidationError
+    ValidationError,
+    MCPConnectionError,
+    MCPToolError,
+    MCPTimeoutError,
 )
 
 # HTTP utilities (for advanced users)
@@ -87,10 +102,19 @@ __author__ = "MiiFlow Team"
 __all__ = [
     # Core classes
     "ToolRegistry",
- 
     "FunctionTool",
     "HTTPTool",
-    
+
+    # MCP classes
+    "MCPTool",
+    "MCPServerConfig",
+    "MCPServerConnection",
+    "StdioMCPConnection",
+    "SSEMCPConnection",
+    "StreamableHTTPMCPConnection",
+    "MCPToolManager",
+    "create_connection",
+
     # Schemas and types
     "ParameterSchema",
     "ToolResult",
@@ -99,34 +123,37 @@ __all__ = [
     "ToolType",
     "FunctionType",
     "ParameterType",
-    
+
     # Decorators
     "tool",
-    "http_tool", 
+    "http_tool",
     "get_tool_from_function",
     "is_tool",
     "get_tool_schema",
     "auto_register_tools",
-    
+
     # Schema utilities
     "get_fun_schema",
     "get_type_string",
     "extract_parameter_info",
-    
+
     # Exceptions
     "ToolPreparationError",
-    "ToolExecutionError", 
+    "ToolExecutionError",
     "HTTPToolError",
     "ProxyError",
     "ValidationError",
-    
+    "MCPConnectionError",
+    "MCPToolError",
+    "MCPTimeoutError",
+
     # HTTP utilities
     "get_proxy_config",
     "should_use_proxy",
-    
+
     # Context patterns
     "ContextPattern",
-    "detect_context_pattern", 
+    "detect_context_pattern",
     "filter_context_params",
 ]
 
@@ -158,14 +185,20 @@ __package_info__ = {
     "features": [
         "Function tools with automatic schema generation",
         "HTTP/REST API tools with proxy support",
+        "MCP (Model Context Protocol) client support",
         "Multi-provider compatibility (OpenAI, Anthropic, Gemini, etc.)",
         "Production-grade error handling and validation",
         "Context injection patterns",
         "Execution statistics and monitoring",
-        "Easy-to-use decorators"
+        "Easy-to-use decorators",
     ],
     "supported_providers": [
         "OpenAI", "Anthropic", "Google Gemini", "Groq",
         "Mistral", "Ollama", "OpenRouter", "xAI"
-    ]
+    ],
+    "mcp_transports": [
+        "stdio",
+        "streamable_http",
+        "sse",
+    ],
 }

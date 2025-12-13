@@ -424,7 +424,6 @@ class Agent(Generic[Deps, Result]):
             safety_manager=safety_manager,
             subtask_orchestrator=react_orchestrator,
             max_replans=max_replans,
-            use_react_for_subtasks=True,  # Use ReAct for complex subtasks
         )
 
         # Real-time streaming setup

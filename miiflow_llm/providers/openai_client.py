@@ -13,6 +13,7 @@ from ..core.exceptions import AuthenticationError, ModelError, ProviderError, Ra
 from ..core.exceptions import TimeoutError as MiiflowTimeoutError
 from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount, UsageData
+from ..core.schema_normalizer import SchemaMode, normalize_json_schema
 from ..core.stream_normalizer import OpenAIStreamNormalizer
 from ..core.streaming import StreamChunk
 from ..models.openai import get_token_param_name, supports_temperature
@@ -40,54 +41,6 @@ class OpenAIClient(ModelClient):
         # Stream normalizer for unified streaming handling
         # Note: Pass class-level mapping for tool name restoration
         self._stream_normalizer = OpenAIStreamNormalizer(OpenAIClient._tool_name_mapping)
-
-    def _clean_json_schema(self, obj: Any) -> None:
-        if not isinstance(obj, dict):
-            return obj
-
-        if obj.get("type") == "object":
-            obj["additionalProperties"] = False
-
-        if "properties" in obj:
-            for prop_key, prop_value in obj["properties"].items():
-                obj["properties"][prop_key] = self._clean_json_schema(prop_value)
-
-        if "items" in obj:
-            obj["items"] = self._clean_json_schema(obj["items"])
-
-        return obj
-
-    def _has_additional_properties(self, obj: Any) -> bool:
-        if not isinstance(obj, dict):
-            return True
-
-        if obj.get("type") == "object" and "additionalProperties" not in obj:
-            return False
-
-        if "properties" in obj:
-            for prop_value in obj["properties"].values():
-                if not self._has_additional_properties(prop_value):
-                    return False
-
-        if "items" in obj:
-            if not self._has_additional_properties(obj["items"]):
-                return False
-
-        return True
-
-    def _add_additional_properties(self, obj: Any) -> None:
-        if not isinstance(obj, dict):
-            return
-
-        if obj.get("type") == "object" and "additionalProperties" not in obj:
-            obj["additionalProperties"] = False
-
-        if "properties" in obj:
-            for prop_value in obj["properties"].values():
-                self._add_additional_properties(prop_value)
-
-        if "items" in obj:
-            self._add_additional_properties(obj["items"])
 
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to OpenAI format with name sanitization."""
@@ -197,21 +150,22 @@ class OpenAIClient(ModelClient):
             if supports_temperature(self.model):
                 request_params["temperature"] = temperature
 
-            if max_tokens:
+            if max_tokens is not None:
                 request_params[get_token_param_name(self.model)] = max_tokens
+            else:
+                # Provide sensible default when not specified
+                request_params[get_token_param_name(self.model)] = 16384
             if tools:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
 
             if json_schema:
-
-                json_schema = self._clean_json_schema(json_schema)
-
+                normalized_schema = normalize_json_schema(json_schema, SchemaMode.STRICT)
                 request_params["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "response_schema",
-                        "schema": json_schema,
+                        "schema": normalized_schema,
                     },
                 }
 
@@ -276,20 +230,22 @@ class OpenAIClient(ModelClient):
             if supports_temperature(self.model):
                 request_params["temperature"] = temperature
 
-            if max_tokens:
+            if max_tokens is not None:
                 request_params[get_token_param_name(self.model)] = max_tokens
+            else:
+                # Provide sensible default when not specified
+                request_params[get_token_param_name(self.model)] = 16384
             if tools:
                 request_params["tools"] = tools
                 request_params["tool_choice"] = "auto"
 
             if json_schema:
-                json_schema = self._clean_json_schema(json_schema)
-
+                normalized_schema = normalize_json_schema(json_schema, SchemaMode.STRICT)
                 request_params["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "response_schema",
-                        "schema": json_schema,
+                        "schema": normalized_schema,
                     },
                 }
 

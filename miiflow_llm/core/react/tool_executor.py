@@ -102,6 +102,9 @@ class AgentToolExecutor:
             # (context is injected, not exposed to LLM)
             filtered_schema = self._filter_context_params(tool_name, universal_schema)
 
+            # Inject __description parameter for LLM to provide human-readable descriptions
+            filtered_schema = self._inject_description_param(filtered_schema)
+
             # Convert to provider-specific format
             provider_schema = self._client.client.convert_schema_to_provider_format(filtered_schema)
             native_schemas.append(provider_schema)
@@ -152,6 +155,36 @@ class AgentToolExecutor:
                     filtered_schema["parameters"]["required"] = required
 
             return filtered_schema
+
+        return schema
+
+    def _inject_description_param(self, schema: dict) -> dict:
+        """Inject __description parameter into tool schema.
+
+        This parameter requires the LLM to provide a human-readable description
+        of what it's doing with each tool call (e.g., 'Searching for Tesla news').
+        """
+        import copy
+
+        schema = copy.deepcopy(schema)
+        if "parameters" not in schema:
+            schema["parameters"] = {"type": "object", "properties": {}, "required": []}
+
+        # Ensure properties dict exists
+        if "properties" not in schema["parameters"]:
+            schema["parameters"]["properties"] = {}
+
+        # Add __description as a required parameter
+        schema["parameters"]["properties"]["__description"] = {
+            "type": "string",
+            "description": "Brief, user-friendly description of what you're doing with this tool call (e.g., 'Searching for Tesla stock price' not just 'search_web')"
+        }
+
+        # Make it required
+        if "required" not in schema["parameters"]:
+            schema["parameters"]["required"] = []
+        if "__description" not in schema["parameters"]["required"]:
+            schema["parameters"]["required"].insert(0, "__description")
 
         return schema
 

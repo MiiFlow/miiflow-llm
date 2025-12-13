@@ -20,6 +20,7 @@ class ToolType(Enum):
     """Types of tools supported by the registry."""
     FUNCTION = "function"
     HTTP_API = "http_api"
+    MCP = "mcp"  # Model Context Protocol tools
 
 
 class ParameterType(Enum):

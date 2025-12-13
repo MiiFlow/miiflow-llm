@@ -33,6 +33,7 @@ from ..core.client import ModelClient
 from ..core.exceptions import AuthenticationError, ModelError, ProviderError
 from ..core.message import DocumentBlock, ImageBlock, Message, MessageRole, TextBlock
 from ..core.metrics import TokenCount
+from ..core.schema_normalizer import SchemaMode, normalize_json_schema
 from ..core.stream_normalizer import GeminiStreamNormalizer
 from ..core.streaming import StreamChunk
 from ..utils.image import image_url_to_bytes
@@ -102,80 +103,12 @@ class GeminiClient(ModelClient):
     def convert_schema_to_provider_format(self, schema: Dict[str, Any]) -> Dict[str, Any]:
         """Convert universal schema to Gemini format."""
         # Normalize parameters to remove unsupported fields (default, additionalProperties, etc.)
-        normalized_parameters = self._normalize_schema_for_gemini(schema["parameters"])
+        normalized_parameters = normalize_json_schema(schema["parameters"], SchemaMode.GEMINI_COMPAT)
         return {
             "name": schema["name"],
             "description": schema["description"],
             "parameters": normalized_parameters,
         }
-
-    def _normalize_schema_for_gemini(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Normalize JSON schema for Gemini API compatibility.
-
-        Gemini has strict requirements:
-        - Does NOT support array types like ["string", "null"]
-        - Does NOT support "additionalProperties" field
-        - Only accepts single type values
-
-        This provides a safety net for schemas from any source.
-        """
-        if not isinstance(schema, dict):
-            return schema
-
-        normalized = {}
-
-        # Fields that Gemini doesn't support
-        unsupported_fields = ["additionalProperties", "$schema", "definitions", "$defs", "default"]
-
-        for key, value in schema.items():
-            # Skip unsupported fields
-            if key in unsupported_fields:
-                continue
-
-            if key == "type":
-                # Convert array types to single type
-                if isinstance(value, list):
-                    # Filter out "null" and take the first non-null type
-                    non_null_types = [t for t in value if t != "null"]
-                    if non_null_types:
-                        normalized[key] = non_null_types[0]
-                    else:
-                        # If only "null", default to "string"
-                        normalized[key] = "string"
-                else:
-                    normalized[key] = value
-
-            elif key == "properties" and isinstance(value, dict):
-                # Recursively normalize nested properties
-                normalized[key] = {
-                    prop_key: self._normalize_schema_for_gemini(prop_value)
-                    for prop_key, prop_value in value.items()
-                }
-
-            elif key == "items" and isinstance(value, dict):
-                # Recursively normalize array items
-                normalized[key] = self._normalize_schema_for_gemini(value)
-
-            elif key == "required" and isinstance(value, list):
-                # Keep required fields list
-                normalized[key] = value
-
-            elif isinstance(value, dict):
-                # Recursively normalize nested objects
-                normalized[key] = self._normalize_schema_for_gemini(value)
-
-            elif isinstance(value, list):
-                # Recursively normalize lists
-                normalized[key] = [
-                    self._normalize_schema_for_gemini(item) if isinstance(item, dict) else item
-                    for item in value
-                ]
-
-            else:
-                normalized[key] = value
-
-        return normalized
 
     def _extract_system_instruction(self, messages: List[Message]) -> Optional[str]:
         """Extract system instruction from messages.
@@ -460,8 +393,8 @@ class GeminiClient(ModelClient):
                     )
                 generation_config_params["response_mime_type"] = "application/json"
                 # Normalize schema for Gemini compatibility
-                generation_config_params["response_schema"] = self._normalize_schema_for_gemini(
-                    json_schema
+                generation_config_params["response_schema"] = normalize_json_schema(
+                    json_schema, SchemaMode.GEMINI_COMPAT
                 )
 
             generation_config = genai.GenerationConfig(**generation_config_params)
@@ -610,8 +543,8 @@ class GeminiClient(ModelClient):
                     )
                 generation_config_params["response_mime_type"] = "application/json"
                 # Normalize schema for Gemini compatibility
-                generation_config_params["response_schema"] = self._normalize_schema_for_gemini(
-                    json_schema
+                generation_config_params["response_schema"] = normalize_json_schema(
+                    json_schema, SchemaMode.GEMINI_COMPAT
                 )
 
             generation_config = genai.GenerationConfig(**generation_config_params)

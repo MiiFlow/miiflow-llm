@@ -7,68 +7,40 @@ Model configurations serve as the single source of truth for model capabilities
 that can be shared between the SDK and server implementations.
 """
 
+# Anthropic
+from .anthropic import ANTHROPIC_MODELS, ANTHROPIC_PARAMETERS
+from .anthropic import supports_structured_outputs as anthropic_supports_structured_outputs
+from .anthropic import supports_thinking as anthropic_supports_thinking
 from .base import ModelConfig, ParameterConfig, ParameterType
 
-# OpenAI
-from .openai import (
-    OPENAI_MODELS,
-    OPENAI_PARAMETERS,
-    get_token_param_name as openai_get_token_param_name,
-    supports_temperature as openai_supports_temperature,
-)
-
-# Anthropic
-from .anthropic import (
-    ANTHROPIC_MODELS,
-    ANTHROPIC_PARAMETERS,
-    supports_structured_outputs as anthropic_supports_structured_outputs,
-    supports_thinking as anthropic_supports_thinking,
-)
+# DeepSeek
+from .deepseek import DEEPSEEK_MODELS, DEEPSEEK_PARAMETERS
+from .deepseek import get_token_param_name as deepseek_get_token_param_name
 
 # Google
-from .google import (
-    GOOGLE_MODELS,
-    GOOGLE_PARAMETERS,
-    get_token_param_name as google_get_token_param_name,
-)
+from .google import GOOGLE_MODELS, GOOGLE_PARAMETERS
+from .google import get_token_param_name as google_get_token_param_name
 
 # Groq
-from .groq import (
-    GROQ_MODELS,
-    GROQ_PARAMETERS,
-)
-
-# DeepSeek
-from .deepseek import (
-    DEEPSEEK_MODELS,
-    DEEPSEEK_PARAMETERS,
-    get_token_param_name as deepseek_get_token_param_name,
-)
+from .groq import GROQ_MODELS, GROQ_PARAMETERS
 
 # Mistral
-from .mistral import (
-    MISTRAL_MODELS,
-    MISTRAL_PARAMETERS,
-)
+from .mistral import MISTRAL_MODELS, MISTRAL_PARAMETERS
 
 # Ollama
-from .ollama import (
-    OLLAMA_MODELS,
-    OLLAMA_PARAMETERS,
-    get_token_param_name as ollama_get_token_param_name,
-)
+from .ollama import OLLAMA_MODELS, OLLAMA_PARAMETERS
+from .ollama import get_token_param_name as ollama_get_token_param_name
+
+# OpenAI
+from .openai import OPENAI_MODELS, OPENAI_PARAMETERS
+from .openai import get_token_param_name as openai_get_token_param_name
+from .openai import supports_temperature as openai_supports_temperature
 
 # OpenRouter
-from .openrouter import (
-    OPENROUTER_MODELS,
-    OPENROUTER_PARAMETERS,
-)
+from .openrouter import OPENROUTER_MODELS, OPENROUTER_PARAMETERS
 
 # xAI
-from .xai import (
-    XAI_MODELS,
-    XAI_PARAMETERS,
-)
+from .xai import XAI_MODELS, XAI_PARAMETERS
 
 __all__ = [
     # Base types

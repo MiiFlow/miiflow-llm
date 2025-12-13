@@ -1,8 +1,10 @@
 """Plan and Execute orchestrator for complex multi-step tasks."""
 
+import ast
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -40,7 +42,7 @@ class PlanAndExecuteOrchestrator:
         safety_manager: SafetyManager,
         subtask_orchestrator: Optional[ReActOrchestrator] = None,
         max_replans: int = 2,
-        use_react_for_subtasks: bool = True,
+        subtask_timeout_seconds: float = 120.0,
     ):
         """Initialize Plan and Execute orchestrator.
 
@@ -48,16 +50,183 @@ class PlanAndExecuteOrchestrator:
             tool_executor: Tool execution adapter
             event_bus: Event bus for streaming events
             safety_manager: Safety condition checker
-            subtask_orchestrator: Optional ReAct orchestrator for complex subtasks
+            subtask_orchestrator: ReAct orchestrator for subtask execution (required)
             max_replans: Maximum number of re-planning attempts
-            use_react_for_subtasks: Whether to use ReAct for subtask execution
+            subtask_timeout_seconds: Timeout for each subtask execution (default 120s)
         """
         self.tool_executor = tool_executor
         self.event_bus = event_bus
         self.safety_manager = safety_manager
         self.subtask_orchestrator = subtask_orchestrator
         self.max_replans = max_replans
-        self.use_react_for_subtasks = use_react_for_subtasks
+        self.subtask_timeout_seconds = subtask_timeout_seconds
+
+    def _validate_plan(self, plan: Plan) -> list[str]:
+        """Validate plan structure, return list of errors.
+
+        Checks for:
+        - Duplicate subtask IDs
+        - Invalid dependency references
+        - Self-dependencies
+        - Dependency cycles
+        - Empty descriptions
+
+        Args:
+            plan: Plan to validate
+
+        Returns:
+            List of error messages (empty if valid)
+        """
+        errors = []
+
+        if not plan.subtasks:
+            return errors  # Empty plan is valid (simple query)
+
+        # Check subtask IDs are unique
+        ids = [st.id for st in plan.subtasks]
+        if len(ids) != len(set(ids)):
+            errors.append("Duplicate subtask IDs detected")
+
+        # Check dependencies reference valid IDs
+        valid_ids = set(ids)
+        for st in plan.subtasks:
+            invalid_deps = set(st.dependencies) - valid_ids
+            if invalid_deps:
+                errors.append(f"Subtask {st.id} has invalid dependencies: {invalid_deps}")
+
+            # Check for self-dependency
+            if st.id in st.dependencies:
+                errors.append(f"Subtask {st.id} depends on itself")
+
+        # Check for cycles
+        if self._has_dependency_cycle(plan):
+            errors.append("Dependency cycle detected - would cause deadlock")
+
+        # Check descriptions are non-empty
+        for st in plan.subtasks:
+            if not st.description or not st.description.strip():
+                errors.append(f"Subtask {st.id} has empty description")
+
+        return errors
+
+    def _has_dependency_cycle(self, plan: Plan) -> bool:
+        """Detect cycles in dependency graph using DFS.
+
+        Args:
+            plan: Plan to check
+
+        Returns:
+            True if cycle detected, False otherwise
+        """
+        if not plan.subtasks:
+            return False
+
+        # Build adjacency list: id -> list of dependent IDs
+        graph = {st.id: st.dependencies for st in plan.subtasks}
+        valid_ids = set(graph.keys())
+
+        # Track visit states: 0=unvisited, 1=visiting (in stack), 2=visited
+        state = {id: 0 for id in valid_ids}
+
+        def dfs(node_id: int) -> bool:
+            """Return True if cycle found."""
+            if node_id not in valid_ids:
+                return False  # Invalid dependency, handled elsewhere
+
+            if state[node_id] == 1:
+                return True  # Back edge = cycle
+            if state[node_id] == 2:
+                return False  # Already fully visited
+
+            state[node_id] = 1  # Mark as visiting
+
+            for dep_id in graph.get(node_id, []):
+                if dfs(dep_id):
+                    return True
+
+            state[node_id] = 2  # Mark as visited
+            return False
+
+        # Check from each node
+        for node_id in valid_ids:
+            if state[node_id] == 0:
+                if dfs(node_id):
+                    return True
+
+        return False
+
+    def _generate_fallback_response(self, query: str, error: Optional[str] = None) -> str:
+        """Generate context-aware fallback response based on query type.
+
+        Args:
+            query: Original user query
+            error: Optional error message
+
+        Returns:
+            Appropriate fallback message
+        """
+        query_lower = query.lower().strip()
+
+        # Detect query type and provide appropriate fallback
+        if any(q in query_lower for q in ["calculate", "compute", "what is", "how much", "how many"]):
+            return "I encountered an issue while processing your calculation. Please try rephrasing your question."
+
+        if any(q in query_lower for q in ["debug", "error", "fix", "why", "broken"]):
+            return "I ran into a problem while analyzing this. Could you provide more context?"
+
+        if any(q in query_lower for q in ["search", "find", "look up", "lookup"]):
+            return "I was unable to complete the search. Please try again or rephrase your query."
+
+        if any(q in query_lower for q in ["summarize", "summary", "explain"]):
+            return "I wasn't able to generate the summary. Please try again."
+
+        # Generic but honest fallback
+        if error:
+            return f"I encountered an unexpected issue: {error}. Please try again."
+
+        return "I wasn't able to process that request. Could you try rephrasing?"
+
+    async def _execute_subtask_with_timeout(
+        self,
+        subtask: SubTask,
+        context: RunContext,
+        plan: Plan,
+    ) -> bool:
+        """Execute subtask with timeout protection.
+
+        Args:
+            subtask: Subtask to execute
+            context: Run context
+            plan: Parent plan (for total subtask count)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Get remaining subtask descriptions for boundary enforcement
+        remaining_descriptions = [
+            st.description for st in plan.subtasks
+            if st.id > subtask.id and st.status == "pending"
+        ]
+
+        try:
+            return await asyncio.wait_for(
+                self._execute_subtask(
+                    subtask,
+                    context,
+                    total_subtasks=len(plan.subtasks),
+                    remaining_subtasks=remaining_descriptions,
+                ),
+                timeout=self.subtask_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            subtask.status = "failed"
+            subtask.error = f"Subtask timed out after {self.subtask_timeout_seconds}s"
+            logger.error(f"Subtask {subtask.id} timed out: {subtask.description}")
+            await self._publish_event(
+                PlanExecuteEventType.SUBTASK_FAILED,
+                {"subtask": subtask.to_dict(), "error": subtask.error, "timeout": True},
+            )
+            return False
 
     async def execute(
         self, query: str, context: RunContext, existing_plan: Optional[Plan] = None
@@ -92,6 +261,12 @@ class PlanAndExecuteOrchestrator:
                 # Generate new plan (fallback for non-tool-calling providers)
                 plan = await self._generate_plan(query, context)
 
+            # Validate plan structure
+            validation_errors = self._validate_plan(plan)
+            if validation_errors:
+                logger.warning(f"Plan validation errors: {validation_errors}")
+                # Log but continue - the errors may be recoverable during execution
+
             # Check if LLM returned empty plan (simple query that doesn't need planning)
             if len(plan.subtasks) == 0:
                 logger.info(
@@ -105,12 +280,12 @@ class PlanAndExecuteOrchestrator:
                     )
                 except Exception as e:
                     logger.error(f"Error generating direct response: {e}", exc_info=True)
-                    final_answer = "Hello! How can I help you today?"
+                    final_answer = self._generate_fallback_response(query, str(e))
 
                 # Ensure we have a valid answer
                 if not final_answer or len(final_answer.strip()) == 0:
                     logger.warning("Empty final answer detected, using fallback")
-                    final_answer = "Hello! How can I help you today?"
+                    final_answer = self._generate_fallback_response(query)
 
                 # Emit final answer event to ensure it's accumulated
                 logger.info(f"Emitting FINAL_ANSWER event with {len(final_answer)} chars")
@@ -146,7 +321,7 @@ class PlanAndExecuteOrchestrator:
                 if replans < self.max_replans:
                     replans += 1
                     logger.info(f"Re-planning (attempt {replans}/{self.max_replans})")
-                    plan = await self._replan(plan, context)
+                    plan = await self._replan(plan, context, replan_attempt=replans)
                 else:
                     logger.warning("Max replans reached, stopping execution")
                     break
@@ -256,6 +431,8 @@ class PlanAndExecuteOrchestrator:
             parser = XMLReActParser()
             parser.reset()
             plan_data = None
+            last_emitted_length = 0  # Track for non-XML fallback
+            xml_thinking_detected = False
 
             async for chunk in self.tool_executor._client.client.astream_chat(
                 messages=messages,
@@ -270,11 +447,33 @@ class PlanAndExecuteOrchestrator:
                     for parse_event in parser.parse_streaming(chunk.delta):
                         if parse_event.event_type == ParseEventType.THINKING:
                             # Thinking chunk detected - emit readable planning reasoning
+                            xml_thinking_detected = True
                             delta = parse_event.data["delta"]
                             await self._publish_event(
                                 PlanExecuteEventType.PLANNING_THINKING_CHUNK,
                                 {"delta": delta, "accumulated": accumulated_content},
                             )
+                            last_emitted_length = len(accumulated_content)
+
+                    # Fallback: if no XML tags detected and we have new content, emit as reasoning
+                    # Only emit if we haven't seen XML thinking tags and content looks like reasoning
+                    if (
+                        not xml_thinking_detected
+                        and not parser.in_thinking
+                        and len(accumulated_content) > last_emitted_length + 30
+                    ):
+                        new_content = accumulated_content[last_emitted_length:]
+                        # Only emit if it doesn't look like JSON (which would be raw plan output)
+                        if not new_content.strip().startswith("{"):
+                            await self._publish_event(
+                                PlanExecuteEventType.PLANNING_THINKING_CHUNK,
+                                {
+                                    "delta": new_content,
+                                    "accumulated": accumulated_content,
+                                    "is_fallback": True,
+                                },
+                            )
+                            last_emitted_length = len(accumulated_content)
 
                 # Accumulate tool calls if present in chunk
                 if chunk.tool_calls:
@@ -426,25 +625,54 @@ class PlanAndExecuteOrchestrator:
 
         return final_answer
 
-    async def _replan(self, current_plan: Plan, context: RunContext) -> Plan:
-        """Re-generate plan after failure.
+    async def _replan(
+        self, current_plan: Plan, context: RunContext, replan_attempt: int = 1
+    ) -> Plan:
+        """Re-generate plan after failure with streaming.
 
         Args:
             current_plan: Current plan with failures
             context: Run context
+            replan_attempt: Current replan attempt number
 
         Returns:
             New revised plan
         """
-        await self._publish_event(
-            PlanExecuteEventType.REPLANNING_START, {"current_plan": current_plan.to_dict()}
-        )
+        # Find failed subtasks (may be multiple in wave execution)
+        failed_subtasks = [st for st in current_plan.subtasks if st.status == "failed"]
+        failed_subtask = failed_subtasks[0] if failed_subtasks else None
 
-        # Find failed subtask
-        failed_subtask = next((st for st in current_plan.subtasks if st.status == "failed"), None)
+        # Emit enhanced replanning start event with failure details
+        await self._publish_event(
+            PlanExecuteEventType.REPLANNING_START,
+            {
+                "current_plan": current_plan.to_dict(),
+                "failed_subtask_id": failed_subtask.id if failed_subtask else None,
+                "failed_subtask_description": failed_subtask.description if failed_subtask else None,
+                "failure_reason": failed_subtask.error if failed_subtask else "Unknown",
+                "failed_count": len(failed_subtasks),
+                "replan_attempt": replan_attempt,
+                "max_replans": self.max_replans,
+            },
+        )
 
         # Build plan status summary
         plan_status = self._format_plan_status(current_plan)
+
+        # Build completed context to preserve successful work
+        completed_results = [
+            (st.id, st.description, st.result[:200] if st.result else "")
+            for st in current_plan.subtasks
+            if st.status == "completed" and st.result
+        ]
+
+        if completed_results:
+            completed_context = "\n\nCompleted Work (use these results):\n" + "\n".join(
+                f"- Subtask {id} ({desc}): {result}..."
+                for id, desc, result in completed_results
+            )
+        else:
+            completed_context = ""
 
         # Build replanning prompt
         replan_prompt = PLAN_AND_EXECUTE_REPLAN_PROMPT.format(
@@ -452,16 +680,45 @@ class PlanAndExecuteOrchestrator:
             plan_status=plan_status,
             failed_subtask=failed_subtask.description if failed_subtask else "Unknown",
             error=failed_subtask.error if failed_subtask else "Unknown error",
+            completed_context=completed_context,
         )
 
         # Create replanning messages
         messages = [Message(role=MessageRole.USER, content=replan_prompt)]
 
-        # Call LLM to replan (higher temperature for diverse plan sizes)
-        response = await self.tool_executor._client.achat(messages=messages, temperature=0.6)
+        # Stream replanning for user feedback
+        accumulated_content = ""
+        async for chunk in self.tool_executor.stream_without_tools(
+            messages=messages, temperature=0.6
+        ):
+            if chunk.delta:
+                accumulated_content += chunk.delta
+                # Emit streaming chunk for UI visibility
+                await self._publish_event(
+                    PlanExecuteEventType.REPLANNING_THINKING_CHUNK,
+                    {"delta": chunk.delta, "content": accumulated_content},
+                )
 
-        # Parse new plan
-        new_plan = self._parse_plan_json(response.message.content, current_plan.goal)
+        # Parse new plan from accumulated content
+        plan_data = self._parse_plan_json_dict(accumulated_content)
+
+        # Convert to Plan object
+        subtasks = []
+        for st_data in plan_data.get("subtasks", []):
+            subtask = SubTask(
+                id=st_data.get("id"),
+                description=st_data.get("description", ""),
+                required_tools=st_data.get("required_tools", []),
+                dependencies=st_data.get("dependencies", []),
+                success_criteria=st_data.get("success_criteria", ""),
+            )
+            subtasks.append(subtask)
+
+        new_plan = Plan(
+            goal=current_plan.goal,
+            reasoning=plan_data.get("reasoning", "Re-planned"),
+            subtasks=subtasks,
+        )
 
         await self._publish_event(
             PlanExecuteEventType.REPLANNING_COMPLETE,
@@ -473,7 +730,7 @@ class PlanAndExecuteOrchestrator:
         return new_plan
 
     async def _execute_plan(self, plan: Plan, context: RunContext) -> bool:
-        """Execute all subtasks in the plan.
+        """Execute all subtasks in the plan sequentially respecting dependencies.
 
         Args:
             plan: Plan to execute
@@ -482,53 +739,47 @@ class PlanAndExecuteOrchestrator:
         Returns:
             True if all subtasks succeeded, False if any failed
         """
-        logger.info(f"Executing plan with {len(plan.subtasks)} subtasks")
+        logger.info(f"Executing plan with {len(plan.subtasks)} subtasks sequentially")
 
-        # Track completed subtasks for dependency checking
-        completed_subtask_ids = set()
+        completed_ids: set = set()
 
-        for subtask in plan.subtasks:
-            # Check dependencies
-            if not self._dependencies_met(subtask, completed_subtask_ids):
-                logger.warning(
-                    f"Subtask {subtask.id} dependencies not met, skipping: {subtask.dependencies}"
+        for i, subtask in enumerate(plan.subtasks):
+            # Check dependencies are satisfied
+            if not self._dependencies_met(subtask, completed_ids):
+                logger.error(
+                    f"Subtask {subtask.id} has unmet dependencies: {subtask.dependencies}"
                 )
                 subtask.status = "failed"
                 subtask.error = "Dependencies not satisfied"
-                continue
-
-            # Get remaining subtask descriptions for boundary enforcement
-            remaining_descriptions = [
-                st.description for st in plan.subtasks
-                if st.id > subtask.id and st.status == "pending"
-            ]
-
-            # Execute subtask (pass total count to conditionally show subtask headers)
-            success = await self._execute_subtask(
-                subtask,
-                context,
-                total_subtasks=len(plan.subtasks),
-                remaining_subtasks=remaining_descriptions,
-            )
-
-            if success:
-                completed_subtask_ids.add(subtask.id)
-            else:
-                # Subtask failed - stop execution and trigger re-planning
-                logger.warning(f"Subtask {subtask.id} failed: {subtask.error}")
                 return False
 
-            # Publish progress
+            # Execute subtask with timeout
+            success = await self._execute_subtask_with_timeout(subtask, context, plan)
+
+            if success:
+                completed_ids.add(subtask.id)
+            else:
+                # Subtask failed - stop execution and trigger replan
+                logger.warning(f"Subtask {subtask.id} failed, stopping plan execution")
+                return False
+
+            # Publish progress after each subtask
             await self._publish_event(
                 PlanExecuteEventType.PLAN_PROGRESS,
                 {
-                    "completed": len(completed_subtask_ids),
+                    "completed": len(completed_ids),
+                    "failed": 0,
                     "total": len(plan.subtasks),
-                    "progress_percentage": (len(completed_subtask_ids) / len(plan.subtasks)) * 100,
+                    "progress_percentage": (len(completed_ids) / len(plan.subtasks)) * 100,
                 },
             )
 
+        logger.info("Plan execution completed successfully")
         return True
+
+    def _dependencies_met(self, subtask: SubTask, completed_ids: set) -> bool:
+        """Check if all dependencies for a subtask are satisfied."""
+        return all(dep_id in completed_ids for dep_id in subtask.dependencies)
 
     async def _execute_subtask(
         self,
@@ -560,150 +811,128 @@ class PlanAndExecuteOrchestrator:
             )
 
         try:
-            if self.use_react_for_subtasks and self.subtask_orchestrator:
-                # Use ReAct orchestrator for complex subtasks with event streaming
-                logger.info(f"Executing subtask {subtask.id} with ReAct: {subtask.description}")
+            if not self.subtask_orchestrator:
+                raise ValueError(
+                    "ReAct orchestrator is required for subtask execution. "
+                    "Please provide subtask_orchestrator in constructor."
+                )
 
-                # Build boundary-aware prompt for multi-step plans
-                if total_subtasks > 1 and remaining_subtasks:
-                    # Warn about upcoming steps to avoid (show max 3)
-                    remaining_warning = "\nDo NOT perform these upcoming steps:\n" + "\n".join(
-                        f"- {desc}" for desc in remaining_subtasks[:3]
-                    )
+            # Use ReAct orchestrator for subtask execution with event streaming
+            logger.info(f"Executing subtask {subtask.id} with ReAct: {subtask.description}")
 
-                    scoped_query = SUBTASK_EXECUTION_PROMPT.format(
-                        subtask_number=subtask.id,
-                        total_subtasks=total_subtasks,
-                        subtask_description=subtask.description,
-                        remaining_steps_warning=remaining_warning,
-                    )
-                elif total_subtasks > 1:
-                    # Multi-step plan but this is the last step
-                    scoped_query = SUBTASK_EXECUTION_PROMPT.format(
-                        subtask_number=subtask.id,
-                        total_subtasks=total_subtasks,
-                        subtask_description=subtask.description,
-                        remaining_steps_warning="",
-                    )
-                else:
-                    # Single subtask plan - no boundary needed
-                    scoped_query = subtask.description
+            # Build boundary-aware prompt for multi-step plans
+            if total_subtasks > 1 and remaining_subtasks:
+                # Warn about upcoming steps to avoid (show max 3)
+                remaining_warning = "\nDo NOT perform these upcoming steps:\n" + "\n".join(
+                    f"- {desc}" for desc in remaining_subtasks[:3]
+                )
 
-                # Create event forwarder to bubble up ReAct events as PlanExecute events
-                def forward_react_event(react_event):
-                    """Forward ReAct events from subtask as PlanExecute subtask events."""
-                    try:
-                        # Convert ReActEvent to PlanExecuteEvent with subtask context
-                        import asyncio
-
-                        if react_event.event_type == ReActEventType.THINKING_CHUNK:
-                            # Create subtask thinking chunk event
-                            asyncio.create_task(
-                                self._publish_event(
-                                    PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                    {
-                                        "subtask_id": subtask.id,
-                                        "delta": react_event.data.get("delta", ""),
-                                        "thought": react_event.data.get("content", ""),
-                                    },
-                                )
-                            )
-                        elif react_event.event_type == ReActEventType.ACTION_PLANNED:
-                            # Tool is about to be called
-                            tool_name = react_event.data.get("action", "unknown")
-                            asyncio.create_task(
-                                self._publish_event(
-                                    PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                    {
-                                        "subtask_id": subtask.id,
-                                        "delta": "",
-                                        "is_tool": True,
-                                        "is_tool_planned": True,
-                                        "tool_name": tool_name,
-                                    },
-                                )
-                            )
-                        elif react_event.event_type == ReActEventType.ACTION_EXECUTING:
-                            # Tool is currently executing
-                            tool_name = react_event.data.get("action", "unknown")
-                            asyncio.create_task(
-                                self._publish_event(
-                                    PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                    {
-                                        "subtask_id": subtask.id,
-                                        "delta": "",
-                                        "is_tool": True,
-                                        "is_tool_executing": True,
-                                        "tool_name": tool_name,
-                                    },
-                                )
-                            )
-                        elif react_event.event_type == ReActEventType.OBSERVATION:
-                            # Tool execution result
-                            observation = str(react_event.data.get("observation", ""))
-                            tool_name = react_event.data.get("action", "unknown")
-                            asyncio.create_task(
-                                self._publish_event(
-                                    PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                    {
-                                        "subtask_id": subtask.id,
-                                        "delta": observation,
-                                        "is_observation": True,
-                                        "tool_name": tool_name,
-                                        "success": react_event.data.get("success", True),
-                                    },
-                                )
-                            )
-                    except Exception as e:
-                        logger.error(f"Error forwarding ReAct event: {e}")
-
-                # Subscribe to subtask orchestrator's events
-                self.subtask_orchestrator.event_bus.subscribe(forward_react_event)
-
-                try:
-                    # Execute subtask with scoped query - events will be forwarded automatically
-                    result = await self.subtask_orchestrator.execute(scoped_query, context)
-
-                    subtask.result = result.final_answer
-                    subtask.cost = result.total_cost
-                    subtask.tokens_used = result.total_tokens
-                    subtask.status = "completed"
-                finally:
-                    # Unsubscribe to avoid memory leaks
-                    self.subtask_orchestrator.event_bus.unsubscribe(forward_react_event)
-
+                scoped_query = SUBTASK_EXECUTION_PROMPT.format(
+                    subtask_number=subtask.id,
+                    total_subtasks=total_subtasks,
+                    subtask_description=subtask.description,
+                    remaining_steps_warning=remaining_warning,
+                )
+            elif total_subtasks > 1:
+                # Multi-step plan but this is the last step
+                scoped_query = SUBTASK_EXECUTION_PROMPT.format(
+                    subtask_number=subtask.id,
+                    total_subtasks=total_subtasks,
+                    subtask_description=subtask.description,
+                    remaining_steps_warning="",
+                )
             else:
-                # Direct tool execution (simpler, faster)
-                logger.info(f"Executing subtask {subtask.id} directly: {subtask.description}")
+                # Single subtask plan - no boundary needed
+                scoped_query = subtask.description
 
-                # For now, we'll use a simple approach: execute the first required tool
-                # In a real implementation, you might parse the description to determine the tool and inputs
-                if subtask.required_tools:
-                    tool_name = subtask.required_tools[0]
-                    # This is simplified - in practice, you'd need to extract tool inputs from the description
-                    # or use an LLM to determine inputs
-                    tool_result = await self.tool_executor.execute_tool(
-                        tool_name, {}, context=context
-                    )
-
-                    if tool_result.success:
-                        subtask.result = str(tool_result.output)
-                        subtask.status = "completed"
-                    else:
-                        subtask.error = tool_result.error
-                        subtask.status = "failed"
-                else:
-                    # No tools required - might be a reasoning or synthesis task
-                    # Use LLM to complete the subtask
-                    messages = [
-                        Message(
-                            role=MessageRole.USER,
-                            content=f"Complete this task: {subtask.description}",
+            # Create event forwarder to bubble up ReAct events as PlanExecute events
+            def forward_react_event(react_event):
+                """Forward ReAct events from subtask as PlanExecute subtask events."""
+                try:
+                    # Convert ReActEvent to PlanExecuteEvent with subtask context
+                    if react_event.event_type == ReActEventType.THINKING_CHUNK:
+                        # Create subtask thinking chunk event
+                        asyncio.create_task(
+                            self._publish_event(
+                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                                {
+                                    "subtask_id": subtask.id,
+                                    "delta": react_event.data.get("delta", ""),
+                                    "thought": react_event.data.get("content", ""),
+                                },
+                            )
                         )
-                    ]
-                    response = await self.tool_executor._client.achat(messages=messages)
-                    subtask.result = response.message.content
-                    subtask.status = "completed"
+                    elif react_event.event_type == ReActEventType.ACTION_PLANNED:
+                        # Tool is about to be called
+                        tool_name = react_event.data.get("action", "unknown")
+                        tool_args = react_event.data.get("action_input", {})
+                        tool_description = react_event.data.get("tool_description")
+                        asyncio.create_task(
+                            self._publish_event(
+                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                                {
+                                    "subtask_id": subtask.id,
+                                    "delta": "",
+                                    "is_tool": True,
+                                    "is_tool_planned": True,
+                                    "tool_name": tool_name,
+                                    "tool_args": tool_args,
+                                    "tool_description": tool_description,
+                                },
+                            )
+                        )
+                    elif react_event.event_type == ReActEventType.ACTION_EXECUTING:
+                        # Tool is currently executing
+                        tool_name = react_event.data.get("action", "unknown")
+                        tool_args = react_event.data.get("action_input", {})
+                        tool_description = react_event.data.get("tool_description")
+                        asyncio.create_task(
+                            self._publish_event(
+                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                                {
+                                    "subtask_id": subtask.id,
+                                    "delta": "",
+                                    "is_tool": True,
+                                    "is_tool_executing": True,
+                                    "tool_name": tool_name,
+                                    "tool_args": tool_args,
+                                    "tool_description": tool_description,
+                                },
+                            )
+                        )
+                    elif react_event.event_type == ReActEventType.OBSERVATION:
+                        # Tool execution result
+                        observation = str(react_event.data.get("observation", ""))
+                        tool_name = react_event.data.get("action", "unknown")
+                        asyncio.create_task(
+                            self._publish_event(
+                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                                {
+                                    "subtask_id": subtask.id,
+                                    "delta": observation,
+                                    "is_observation": True,
+                                    "tool_name": tool_name,
+                                    "success": react_event.data.get("success", True),
+                                },
+                            )
+                        )
+                except Exception as e:
+                    logger.error(f"Error forwarding ReAct event: {e}")
+
+            # Subscribe to subtask orchestrator's events
+            self.subtask_orchestrator.event_bus.subscribe(forward_react_event)
+
+            try:
+                # Execute subtask with scoped query - events will be forwarded automatically
+                result = await self.subtask_orchestrator.execute(scoped_query, context)
+
+                subtask.result = result.final_answer
+                subtask.cost = result.total_cost
+                subtask.tokens_used = result.total_tokens
+                subtask.status = "completed"
+            finally:
+                # Unsubscribe to avoid memory leaks
+                self.subtask_orchestrator.event_bus.unsubscribe(forward_react_event)
 
             subtask.execution_time = time.time() - start_time
 
@@ -747,6 +976,18 @@ class PlanAndExecuteOrchestrator:
         Returns:
             Final answer string
         """
+        # Emit synthesis start event for UI visibility
+        await self._publish_event(
+            PlanExecuteEventType.SYNTHESIS_START,
+            {
+                "completed_subtasks": plan.completed_subtasks,
+                "total_subtasks": plan.total_subtasks,
+                "results_preview": [
+                    st.description for st in plan.subtasks if st.status == "completed"
+                ],
+            },
+        )
+
         # Collect successful subtask results
         results = []
         for subtask in plan.subtasks:
@@ -787,12 +1028,21 @@ Provide a clear, well-formatted final answer that directly addresses the user's 
     def _parse_plan_json_dict(self, json_str: str) -> dict:
         """Parse JSON plan from LLM response (fallback for providers without JSON schema).
 
+        This method handles common LLM JSON output issues:
+        - Markdown code blocks
+        - Single quotes instead of double quotes
+        - Trailing commas
+        - Unquoted property names
+        - Python dict literal format
+        - Thinking/explanation text mixed with JSON
+
         Args:
             json_str: JSON string from LLM (may include markdown, thinking text, etc.)
 
         Returns:
             Parsed plan data as dict with 'reasoning' and 'subtasks' keys
         """
+        original_str = json_str
         try:
             # Extract JSON from response (might have markdown code blocks or thinking text)
             json_str = json_str.strip()
@@ -822,14 +1072,93 @@ Provide a clear, well-formatted final answer that directly addresses the user's 
             if not json_str:
                 raise ValueError("No JSON content found in response")
 
-            plan_data = json.loads(json_str)
-            return plan_data
+            # Try standard JSON parsing first
+            try:
+                plan_data = json.loads(json_str)
+                return plan_data
+            except json.JSONDecodeError:
+                # Continue to fallback methods
+                pass
+
+            # Fallback 1: Sanitize common JSON issues
+            sanitized = self._sanitize_json_string(json_str)
+            try:
+                plan_data = json.loads(sanitized)
+                logger.info("Successfully parsed plan JSON after sanitization")
+                return plan_data
+            except json.JSONDecodeError:
+                pass
+
+            # Fallback 2: Try ast.literal_eval for Python dict notation
+            try:
+                plan_data = ast.literal_eval(json_str)
+                if isinstance(plan_data, dict):
+                    logger.info("Successfully parsed plan using ast.literal_eval")
+                    return plan_data
+            except (ValueError, SyntaxError):
+                pass
+
+            # Fallback 3: Try ast.literal_eval on sanitized string
+            try:
+                plan_data = ast.literal_eval(sanitized)
+                if isinstance(plan_data, dict):
+                    logger.info("Successfully parsed sanitized plan using ast.literal_eval")
+                    return plan_data
+            except (ValueError, SyntaxError):
+                pass
+
+            # All parsing methods failed
+            raise ValueError(f"Could not parse JSON with any method")
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.error(f"Failed to parse plan JSON: {e}")
-            logger.debug(f"JSON string was: {json_str[:500]}...")
+            logger.debug(f"Original string was: {original_str[:500]}...")
             # Return empty plan data on parse failure
             return {"reasoning": f"Failed to parse plan: {str(e)}", "subtasks": []}
+
+    def _sanitize_json_string(self, json_str: str) -> str:
+        """Sanitize common JSON formatting issues from LLM output.
+
+        Handles:
+        - Single quotes → double quotes
+        - Trailing commas before closing brackets
+        - Unquoted property names
+        - JavaScript comments
+
+        Args:
+            json_str: Raw JSON-like string
+
+        Returns:
+            Sanitized JSON string
+        """
+        result = json_str
+
+        # Remove JavaScript-style comments (// and /* */)
+        result = re.sub(r"//.*?$", "", result, flags=re.MULTILINE)
+        result = re.sub(r"/\*.*?\*/", "", result, flags=re.DOTALL)
+
+        # Replace single quotes with double quotes (careful with nested quotes)
+        # This regex handles the common case where properties use single quotes
+        # Pattern: matches 'key': or 'value' patterns
+        # Step 1: Replace single-quoted keys: 'key':
+        result = re.sub(r"'(\w+)'\s*:", r'"\1":', result)
+
+        # Step 2: Replace single-quoted string values that follow : or ,
+        # This is trickier - we use a simple approach that works for most cases
+        # Match : followed by optional whitespace and single-quoted string
+        result = re.sub(r":\s*'([^']*)'", r': "\1"', result)
+        # Match [ or , followed by optional whitespace and single-quoted string
+        result = re.sub(r"([\[,])\s*'([^']*)'", r'\1 "\2"', result)
+
+        # Remove trailing commas before closing brackets/braces
+        # Pattern: comma followed by whitespace and then } or ]
+        result = re.sub(r",\s*([\]\}])", r"\1", result)
+
+        # Handle unquoted property names (e.g., {reasoning: "value"} → {"reasoning": "value"})
+        # Pattern: start of object or comma, whitespace, unquoted word, colon
+        result = re.sub(r"([\{,])\s*(\w+)\s*:", r'\1"\2":', result)
+
+        return result
 
     def _dependencies_met(self, subtask: SubTask, completed_ids: set) -> bool:
         """Check if subtask dependencies are satisfied.

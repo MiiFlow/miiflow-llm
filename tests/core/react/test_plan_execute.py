@@ -189,7 +189,6 @@ class TestPlanAndExecuteOrchestrator:
             safety_manager=safety_manager,
             subtask_orchestrator=None,
             max_replans=2,
-            use_react_for_subtasks=False,
         )
 
         return orchestrator
@@ -199,7 +198,6 @@ class TestPlanAndExecuteOrchestrator:
         orchestrator = self._create_orchestrator()
 
         assert orchestrator.max_replans == 2
-        assert orchestrator.use_react_for_subtasks is False
         assert orchestrator.event_bus is not None
         assert orchestrator.safety_manager is not None
 

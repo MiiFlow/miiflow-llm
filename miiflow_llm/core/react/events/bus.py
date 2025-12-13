@@ -95,21 +95,30 @@ class EventFactory:
         )
 
     @staticmethod
-    def action_planned(step_number: int, action: str, action_input: dict) -> ReActEvent:
+    def action_planned(step_number: int, action: str, action_input: dict, tool_description: str = None) -> ReActEvent:
         """Create action planned event."""
         return ReActEvent(
             event_type=ReActEventType.ACTION_PLANNED,
             step_number=step_number,
-            data={"action": action, "action_input": action_input}
+            data={
+                "action": action,
+                "action_input": action_input,
+                "tool_description": tool_description,
+            }
         )
-    
+
     @staticmethod
-    def action_executing(step_number: int, action: str, action_input: dict) -> ReActEvent:
+    def action_executing(step_number: int, action: str, action_input: dict, tool_description: str = None) -> ReActEvent:
         """Create action executing event."""
         return ReActEvent(
             event_type=ReActEventType.ACTION_EXECUTING,
             step_number=step_number,
-            data={"action": action, "action_input": action_input, "status": "executing"}
+            data={
+                "action": action,
+                "action_input": action_input,
+                "status": "executing",
+                "tool_description": tool_description,
+            }
         )
     
     @staticmethod

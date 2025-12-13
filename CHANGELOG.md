@@ -2,6 +2,26 @@
 
 All notable changes to miiflow-llm will be documented here.
 
+## [0.3.0] - 2025-12-12
+
+### Added
+- Plan validation to catch invalid plans early (duplicate tasks, circular dependencies, missing references)
+- Real-time streaming during replanning phase so users can see the agent's thinking as it recovers from failures
+- Human-readable tool descriptions in events (e.g., "Searching for Tesla stock price" instead of just "search_web")
+- Subtask timeout protection to prevent individual tasks from hanging indefinitely (default 120s)
+- Context-aware error messages that provide relevant guidance based on what the user was trying to do
+- OpenRouter provider support
+
+### Changed
+- Simplified API by making ReAct orchestrator the standard for subtask execution (removed `use_react_for_subtasks` flag)
+- Richer replanning events with failure context so UIs can show why and how the agent is adapting
+- Preserved completed work during replanning to avoid re-executing successful subtasks
+- Tool events now include arguments and descriptions for better observability in UIs
+
+### Fixed
+- Tool call state sometimes not updating properly in the UI
+- Test reliability improvements
+
 ## [0.2.0] - 2025-12-05
 
 ### Added

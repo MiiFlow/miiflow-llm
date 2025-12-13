@@ -1,16 +1,21 @@
-"""Tool registry for managing function and HTTP tools."""
+"""Tool registry for managing function, HTTP, and MCP tools."""
+
+from __future__ import annotations
 
 import asyncio
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .exceptions import ToolPreparationError
 from .function import FunctionTool
 from .http import HTTPTool
 from .schemas import ToolResult, ToolSchema
 from .types import ToolType
+
+if TYPE_CHECKING:
+    from .mcp import MCPTool, MCPToolManager
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +28,19 @@ def _sanitize_tool_name(name: str) -> str:
 
 
 class ToolRegistry:
-    """Tool registry with allowlist validation and safe execution."""
+    """Tool registry with allowlist validation and safe execution.
+
+    Supports three types of tools:
+    - FunctionTool: Python function wrappers
+    - HTTPTool: REST API wrappers
+    - MCPTool: Model Context Protocol server tools
+    """
 
     def __init__(self, allowlist: Optional[List[str]] = None, enable_logging: bool = True):
         self.tools: Dict[str, FunctionTool] = {}
         self.http_tools: Dict[str, HTTPTool] = {}
+        self.mcp_tools: Dict[str, MCPTool] = {}
+        self.mcp_manager: Optional[MCPToolManager] = None
         self.allowlist = set(allowlist) if allowlist else None
         self.enable_logging = enable_logging
         self.execution_stats: Dict[str, Dict[str, Any]] = {}
@@ -107,14 +120,87 @@ class ToolRegistry:
         resolved_name = self._resolve_name(name)
         return self.http_tools.get(resolved_name)
 
+    def register_mcp_tool(self, tool: MCPTool) -> None:
+        """Register an MCP tool with allowlist validation.
+
+        Args:
+            tool: MCPTool instance to register
+
+        Raises:
+            ToolPreparationError: If tool not in allowlist
+        """
+        if self.allowlist and tool.name not in self.allowlist:
+            raise ToolPreparationError(
+                f"MCP tool '{tool.name}' not in allowlist: {self.allowlist}"
+            )
+
+        self.mcp_tools[tool.name] = tool
+        self.execution_stats[tool.name] = {
+            "calls": 0,
+            "successes": 0,
+            "failures": 0,
+            "total_time": 0.0,
+        }
+
+        # Register sanitized name mapping for OpenAI compatibility
+        sanitized_name = _sanitize_tool_name(tool.name)
+        if sanitized_name != tool.name:
+            self._sanitized_to_original[sanitized_name] = tool.name
+
+        if self.enable_logging:
+            logger.info(
+                f"Registered MCP tool: {tool.name} "
+                f"(server: {tool.server_name}, original: {tool.original_name})"
+            )
+
+    def register_mcp_manager(self, manager: MCPToolManager) -> None:
+        """Register all tools from an MCPToolManager.
+
+        Args:
+            manager: Connected MCPToolManager with discovered tools
+        """
+        self.mcp_manager = manager
+        for tool in manager.get_all_tools():
+            self.register_mcp_tool(tool)
+
+        if self.enable_logging:
+            logger.info(
+                f"Registered {len(manager.get_all_tools())} MCP tools from manager"
+            )
+
+    def get_mcp_tool(self, name: str) -> Optional[MCPTool]:
+        """Get an MCP tool by name (supports sanitized names from OpenAI).
+
+        Args:
+            name: Tool name (namespaced or sanitized)
+
+        Returns:
+            MCPTool instance or None if not found
+        """
+        resolved_name = self._resolve_name(name)
+        return self.mcp_tools.get(resolved_name)
+
     def list_tools(self) -> List[str]:
-        """List all registered tool names (function and HTTP)."""
-        return list(self.tools.keys()) + list(self.http_tools.keys())
+        """List all registered tool names (function, HTTP, and MCP)."""
+        return (
+            list(self.tools.keys())
+            + list(self.http_tools.keys())
+            + list(self.mcp_tools.keys())
+        )
 
     def get_schemas(self, provider: str, client=None) -> List[Dict[str, Any]]:
-        """Get all tool schemas in provider format."""
+        """Get all tool schemas in provider format.
+
+        Args:
+            provider: Provider name (openai, anthropic, gemini, etc.)
+            client: Optional client with convert_schema_to_provider_format method
+
+        Returns:
+            List of provider-formatted tool schemas
+        """
         schemas = []
 
+        # Function tools
         for tool in self.tools.values():
             if client and hasattr(client, "convert_schema_to_provider_format"):
                 universal_schema = tool.definition.to_universal_schema()
@@ -122,12 +208,21 @@ class ToolRegistry:
             else:
                 schemas.append(tool.to_provider_format(provider))
 
+        # HTTP tools
         for http_tool in self.http_tools.values():
             if client and hasattr(client, "convert_schema_to_provider_format"):
                 universal_schema = http_tool.schema.to_universal_schema()
                 schemas.append(client.convert_schema_to_provider_format(universal_schema))
             else:
                 schemas.append(http_tool.schema.to_provider_format(provider))
+
+        # MCP tools
+        for mcp_tool in self.mcp_tools.values():
+            if client and hasattr(client, "convert_schema_to_provider_format"):
+                universal_schema = mcp_tool.schema.to_universal_schema()
+                schemas.append(client.convert_schema_to_provider_format(universal_schema))
+            else:
+                schemas.append(mcp_tool.to_provider_format(provider))
 
         return schemas
 
@@ -136,7 +231,11 @@ class ToolRegistry:
         # Resolve sanitized name back to original (for OpenAI compatibility)
         resolved_name = self._resolve_name(name)
 
-        if resolved_name not in self.tools and resolved_name not in self.http_tools:
+        if (
+            resolved_name not in self.tools
+            and resolved_name not in self.http_tools
+            and resolved_name not in self.mcp_tools
+        ):
             return False
 
         if self.allowlist and resolved_name not in self.allowlist:
@@ -146,15 +245,21 @@ class ToolRegistry:
             if resolved_name in self.tools:
                 tool = self.tools[resolved_name]
                 tool.validate_inputs(**kwargs)
-            else:
+            elif resolved_name in self.http_tools:
                 http_tool = self.http_tools[resolved_name]
                 http_tool._validate_parameters(kwargs)
+            elif resolved_name in self.mcp_tools:
+                mcp_tool = self.mcp_tools[resolved_name]
+                mcp_tool.validate_inputs(**kwargs)
             return True
         except Exception:
             return False
 
     async def execute_safe(self, tool_name: str, **kwargs) -> ToolResult:
-        """Execute a tool with comprehensive error handling and stats tracking."""
+        """Execute a tool with comprehensive error handling and stats tracking.
+
+        Supports function tools, HTTP tools, and MCP tools.
+        """
         # Resolve sanitized name back to original (for OpenAI compatibility)
         resolved_name = self._resolve_name(tool_name)
 
@@ -163,9 +268,10 @@ class ToolRegistry:
 
         function_tool = self.get(tool_name)
         http_tool = self.get_http_tool(tool_name)
+        mcp_tool = self.get_mcp_tool(tool_name)
 
-        if not function_tool and not http_tool:
-            all_tools = list(self.tools.keys()) + list(self.http_tools.keys())
+        if not function_tool and not http_tool and not mcp_tool:
+            all_tools = self.list_tools()
             error_msg = f"Tool '{tool_name}' not found. Available: {all_tools}"
             if self.enable_logging:
                 logger.error(error_msg)
@@ -196,8 +302,10 @@ class ToolRegistry:
         try:
             if function_tool:
                 result = await function_tool.acall(**kwargs)
-            else:
+            elif http_tool:
                 result = await http_tool.execute(**kwargs)
+            elif mcp_tool:
+                result = await mcp_tool.execute(**kwargs)
 
             if resolved_name in self.execution_stats:
                 stats = self.execution_stats[resolved_name]
