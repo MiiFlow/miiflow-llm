@@ -8,11 +8,12 @@ from typing import List
 from miiflow_llm import RunContext, ToolRegistry, tool
 from miiflow_llm.core.react.plan_execute_orchestrator import PlanAndExecuteOrchestrator
 from miiflow_llm.core.react.enums import PlanExecuteEventType, StopReason
-from miiflow_llm.core.react.models import Plan, SubTask, PlanExecuteResult
+from miiflow_llm.core.react.models import Plan, SubTask, PlanExecuteResult, ReActResult
 from miiflow_llm.core.react.react_events import PlanExecuteEvent
 from miiflow_llm.core.react.events import EventBus
 from miiflow_llm.core.react.safety import SafetyManager
 from miiflow_llm.core.react.tool_executor import AgentToolExecutor
+from miiflow_llm.core.react.orchestrator import ReActOrchestrator
 
 
 class TestPlanDataStructures:
@@ -175,10 +176,35 @@ class TestPlanAndExecuteOrchestrator:
 
         return mock_executor
 
-    def _create_orchestrator(self, tool_executor=None):
+    def _create_mock_subtask_orchestrator(self, result_answer="Subtask result", raise_exception=None):
+        """Create a mock ReAct orchestrator for subtask execution."""
+        mock_subtask_orchestrator = MagicMock(spec=ReActOrchestrator)
+
+        # Create a mock event_bus with subscribe/unsubscribe methods
+        mock_event_bus = MagicMock()
+        mock_event_bus.subscribe = MagicMock()
+        mock_event_bus.unsubscribe = MagicMock()
+        mock_subtask_orchestrator.event_bus = mock_event_bus
+
+        if raise_exception:
+            mock_subtask_orchestrator.execute = AsyncMock(side_effect=raise_exception)
+        else:
+            # Configure mock to return successful results
+            mock_result = ReActResult(
+                final_answer=result_answer,
+                stop_reason=StopReason.ANSWER_COMPLETE,
+                steps=[],
+            )
+            mock_subtask_orchestrator.execute = AsyncMock(return_value=mock_result)
+        return mock_subtask_orchestrator
+
+    def _create_orchestrator(self, tool_executor=None, subtask_orchestrator=None):
         """Create orchestrator with mock components."""
         if tool_executor is None:
             tool_executor = self._create_mock_tool_executor()
+
+        if subtask_orchestrator is None:
+            subtask_orchestrator = self._create_mock_subtask_orchestrator()
 
         event_bus = EventBus()
         safety_manager = SafetyManager(max_steps=10)
@@ -187,7 +213,7 @@ class TestPlanAndExecuteOrchestrator:
             tool_executor=tool_executor,
             event_bus=event_bus,
             safety_manager=safety_manager,
-            subtask_orchestrator=None,
+            subtask_orchestrator=subtask_orchestrator,
             max_replans=2,
         )
 
@@ -266,13 +292,10 @@ class TestPlanAndExecuteOrchestrator:
 
         mock_executor.stream_without_tools = mock_stream
 
-        # Mock tool execution for direct execution
-        tool_result = MagicMock()
-        tool_result.success = True
-        tool_result.output = "Tool output"
-        mock_executor.execute_tool = AsyncMock(return_value=tool_result)
+        # Create subtask orchestrator that returns success
+        mock_subtask_orchestrator = self._create_mock_subtask_orchestrator(result_answer="Tool output")
 
-        orchestrator = self._create_orchestrator(mock_executor)
+        orchestrator = self._create_orchestrator(mock_executor, mock_subtask_orchestrator)
 
         # Create existing plan
         plan = Plan(
@@ -324,16 +347,13 @@ class TestPlanAndExecuteOrchestrator:
 
     @pytest.mark.asyncio
     async def test_subtask_execution_with_tool(self):
-        """Test subtask execution with a tool."""
+        """Test subtask execution via ReAct orchestrator."""
         mock_executor = self._create_mock_tool_executor()
 
-        # Mock tool execution
-        tool_result = MagicMock()
-        tool_result.success = True
-        tool_result.output = "Search results"
-        mock_executor.execute_tool = AsyncMock(return_value=tool_result)
+        # Create subtask orchestrator that returns specific result
+        mock_subtask_orchestrator = self._create_mock_subtask_orchestrator(result_answer="Search results")
 
-        orchestrator = self._create_orchestrator(mock_executor)
+        orchestrator = self._create_orchestrator(mock_executor, mock_subtask_orchestrator)
 
         subtask = SubTask(
             id=1,
@@ -348,20 +368,17 @@ class TestPlanAndExecuteOrchestrator:
         assert success is True
         assert subtask.status == "completed"
         assert subtask.result == "Search results"
-        mock_executor.execute_tool.assert_called_once()
+        mock_subtask_orchestrator.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_subtask_execution_without_tool(self):
-        """Test subtask execution without tools (LLM reasoning)."""
+        """Test subtask execution without tools (LLM reasoning via ReAct)."""
         mock_executor = self._create_mock_tool_executor()
 
-        # Mock LLM response for reasoning task
-        mock_response = MagicMock()
-        mock_response.message = MagicMock()
-        mock_response.message.content = "Reasoning result"
-        mock_executor._client.achat = AsyncMock(return_value=mock_response)
+        # Create subtask orchestrator that returns reasoning result
+        mock_subtask_orchestrator = self._create_mock_subtask_orchestrator(result_answer="Reasoning result")
 
-        orchestrator = self._create_orchestrator(mock_executor)
+        orchestrator = self._create_orchestrator(mock_executor, mock_subtask_orchestrator)
 
         subtask = SubTask(
             id=1,
@@ -379,21 +396,19 @@ class TestPlanAndExecuteOrchestrator:
 
     @pytest.mark.asyncio
     async def test_subtask_execution_tool_failure_marks_status(self):
-        """Test that tool failure marks subtask status as failed.
+        """Test that orchestrator exception marks subtask status as failed.
 
-        Note: The current implementation continues execution (returns True) even when
-        a tool fails, allowing the plan to proceed. The subtask status is set to "failed"
-        to track the failure, but execution continues to allow graceful degradation.
+        Note: When the ReAct orchestrator raises an exception (e.g., from a tool failure),
+        the subtask is marked as failed and execution returns False.
         """
         mock_executor = self._create_mock_tool_executor()
 
-        # Mock tool execution failure
-        tool_result = MagicMock()
-        tool_result.success = False
-        tool_result.error = "Tool failed"
-        mock_executor.execute_tool = AsyncMock(return_value=tool_result)
+        # Create subtask orchestrator that raises an exception (simulating tool failure)
+        mock_subtask_orchestrator = self._create_mock_subtask_orchestrator(
+            raise_exception=RuntimeError("Tool failed")
+        )
 
-        orchestrator = self._create_orchestrator(mock_executor)
+        orchestrator = self._create_orchestrator(mock_executor, mock_subtask_orchestrator)
 
         subtask = SubTask(
             id=1,
@@ -405,20 +420,22 @@ class TestPlanAndExecuteOrchestrator:
         context = RunContext(deps=None, messages=[])
         success = await orchestrator._execute_subtask(subtask, context, total_subtasks=1)
 
-        # Current behavior: execution continues (returns True) but subtask is marked failed
-        assert success is True  # Orchestrator continues despite tool failure
-        assert subtask.status == "failed"  # But subtask is marked as failed
-        assert subtask.error == "Tool failed"
+        # Exception in orchestrator causes failure
+        assert success is False
+        assert subtask.status == "failed"
+        assert "Tool failed" in subtask.error
 
     @pytest.mark.asyncio
     async def test_subtask_execution_exception_returns_false(self):
         """Test that exceptions during execution return False."""
         mock_executor = self._create_mock_tool_executor()
 
-        # Mock tool execution to raise exception
-        mock_executor.execute_tool = AsyncMock(side_effect=RuntimeError("Network error"))
+        # Create subtask orchestrator that raises exception
+        mock_subtask_orchestrator = self._create_mock_subtask_orchestrator(
+            raise_exception=RuntimeError("Network error")
+        )
 
-        orchestrator = self._create_orchestrator(mock_executor)
+        orchestrator = self._create_orchestrator(mock_executor, mock_subtask_orchestrator)
 
         subtask = SubTask(
             id=1,
@@ -440,11 +457,8 @@ class TestPlanAndExecuteOrchestrator:
         """Test that plan execution respects subtask dependencies."""
         mock_executor = self._create_mock_tool_executor()
 
-        # Mock successful tool execution
-        tool_result = MagicMock()
-        tool_result.success = True
-        tool_result.output = "Result"
-        mock_executor.execute_tool = AsyncMock(return_value=tool_result)
+        # Create subtask orchestrator that returns success
+        mock_subtask_orchestrator = self._create_mock_subtask_orchestrator(result_answer="Result")
 
         # Mock stream for synthesis
         async def mock_stream(*args, **kwargs):
@@ -453,7 +467,7 @@ class TestPlanAndExecuteOrchestrator:
 
         mock_executor.stream_without_tools = mock_stream
 
-        orchestrator = self._create_orchestrator(mock_executor)
+        orchestrator = self._create_orchestrator(mock_executor, mock_subtask_orchestrator)
 
         # Create plan with dependencies
         plan = Plan(
