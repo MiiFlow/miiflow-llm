@@ -7,7 +7,7 @@ This example demonstrates the Plan & Execute pattern for complex tasks:
 
 import asyncio
 
-from miiflow_llm import LLMClient, Agent, AgentType, RunContext, tool
+from miiflow_llm import Agent, AgentType, LLMClient, RunContext, tool
 from miiflow_llm.core.react import PlanExecuteEventType
 
 

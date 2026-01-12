@@ -2,16 +2,18 @@
 
 import ast
 import asyncio
+import copy
 import json
 import logging
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from ..agent import RunContext
 from ..message import Message, MessageRole
-from .enums import PlanExecuteEventType, ReActEventType, StopReason
-from .models import Plan, PlanExecuteResult, SubTask
+from .enums import ParallelPlanEventType, PlanExecuteEventType, ReActEventType, StopReason
+from .models import ExecutionWave, Plan, PlanExecuteResult, SubTask
+from .react_events import ParallelPlanEvent
 from .prompts import PLAN_AND_EXECUTE_REPLAN_PROMPT, SUBTASK_EXECUTION_PROMPT
 from .react_events import PlanExecuteEvent
 from .events import EventBus
@@ -43,6 +45,8 @@ class PlanAndExecuteOrchestrator:
         subtask_orchestrator: Optional[ReActOrchestrator] = None,
         max_replans: int = 2,
         subtask_timeout_seconds: float = 120.0,
+        parallel_execution: bool = False,
+        max_parallel_subtasks: int = 5,
     ):
         """Initialize Plan and Execute orchestrator.
 
@@ -53,6 +57,8 @@ class PlanAndExecuteOrchestrator:
             subtask_orchestrator: ReAct orchestrator for subtask execution (required)
             max_replans: Maximum number of re-planning attempts
             subtask_timeout_seconds: Timeout for each subtask execution (default 120s)
+            parallel_execution: Whether to execute independent subtasks in parallel waves
+            max_parallel_subtasks: Maximum subtasks to run in parallel per wave (when parallel_execution=True)
         """
         self.tool_executor = tool_executor
         self.event_bus = event_bus
@@ -60,6 +66,41 @@ class PlanAndExecuteOrchestrator:
         self.subtask_orchestrator = subtask_orchestrator
         self.max_replans = max_replans
         self.subtask_timeout_seconds = subtask_timeout_seconds
+        self.parallel_execution = parallel_execution
+        self.max_parallel_subtasks = max_parallel_subtasks
+
+    def _create_isolated_orchestrator(self) -> "ReActOrchestrator":
+        """Create an isolated ReAct orchestrator instance for parallel execution.
+
+        During parallel subtask execution, each subtask needs:
+        1. Its own event bus - to prevent event cross-contamination
+        2. Its own parser - XMLReActParser has mutable state (buffer, in_thinking, etc.)
+           that gets corrupted when shared between concurrent subtasks
+
+        The tool_executor and safety_manager are stateless and can be safely shared.
+
+        Returns:
+            A new ReActOrchestrator instance with isolated event bus and parser.
+        """
+        from .events import EventBus
+        from .parsing.xml_parser import XMLReActParser
+
+        # Create isolated event bus for this orchestrator
+        isolated_event_bus = EventBus()
+
+        # Create isolated parser - CRITICAL: XMLReActParser has mutable state
+        # (buffer, current_thinking, in_thinking, in_answer, etc.) that would
+        # cause token interleaving if shared between parallel subtasks
+        isolated_parser = XMLReActParser()
+
+        # Create new orchestrator with isolated event bus AND parser
+        # tool_executor and safety_manager are stateless, safe to share
+        return ReActOrchestrator(
+            tool_executor=self.subtask_orchestrator.tool_executor,
+            event_bus=isolated_event_bus,
+            safety_manager=self.subtask_orchestrator.safety_manager,
+            parser=isolated_parser,
+        )
 
     def _validate_plan(self, plan: Plan) -> list[str]:
         """Validate plan structure, return list of errors.
@@ -191,6 +232,7 @@ class PlanAndExecuteOrchestrator:
         subtask: SubTask,
         context: RunContext,
         plan: Plan,
+        orchestrator: Optional["ReActOrchestrator"] = None,
     ) -> bool:
         """Execute subtask with timeout protection.
 
@@ -198,6 +240,8 @@ class PlanAndExecuteOrchestrator:
             subtask: Subtask to execute
             context: Run context
             plan: Parent plan (for total subtask count)
+            orchestrator: Optional isolated orchestrator for parallel execution.
+                         If None, uses self.subtask_orchestrator.
 
         Returns:
             True if successful, False otherwise
@@ -215,6 +259,7 @@ class PlanAndExecuteOrchestrator:
                     context,
                     total_subtasks=len(plan.subtasks),
                     remaining_subtasks=remaining_descriptions,
+                    orchestrator=orchestrator,
                 ),
                 timeout=self.subtask_timeout_seconds,
             )
@@ -730,6 +775,23 @@ class PlanAndExecuteOrchestrator:
         return new_plan
 
     async def _execute_plan(self, plan: Plan, context: RunContext) -> bool:
+        """Execute all subtasks in the plan.
+
+        Dispatches to sequential or parallel execution based on parallel_execution flag.
+
+        Args:
+            plan: Plan to execute
+            context: Run context
+
+        Returns:
+            True if all subtasks succeeded, False if any failed
+        """
+        if self.parallel_execution:
+            return await self._execute_plan_parallel(plan, context)
+        else:
+            return await self._execute_plan_sequential(plan, context)
+
+    async def _execute_plan_sequential(self, plan: Plan, context: RunContext) -> bool:
         """Execute all subtasks in the plan sequentially respecting dependencies.
 
         Args:
@@ -741,7 +803,7 @@ class PlanAndExecuteOrchestrator:
         """
         logger.info(f"Executing plan with {len(plan.subtasks)} subtasks sequentially")
 
-        completed_ids: set = set()
+        completed_ids: Set[int] = set()
 
         for i, subtask in enumerate(plan.subtasks):
             # Check dependencies are satisfied
@@ -777,6 +839,239 @@ class PlanAndExecuteOrchestrator:
         logger.info("Plan execution completed successfully")
         return True
 
+    async def _execute_plan_parallel(self, plan: Plan, context: RunContext) -> bool:
+        """Execute all subtasks in parallel waves respecting dependencies.
+
+        Groups subtasks into waves where each wave contains subtasks that can
+        run in parallel (all their dependencies are in completed waves).
+
+        Args:
+            plan: Plan to execute
+            context: Run context
+
+        Returns:
+            True if all subtasks succeeded, False if any failed
+        """
+        logger.info(f"Executing plan with {len(plan.subtasks)} subtasks in parallel waves")
+
+        # Build execution waves
+        waves = self._build_execution_waves(plan.subtasks)
+
+        if not waves:
+            logger.info("No waves to execute (empty plan)")
+            return True
+
+        completed_ids: Set[int] = set()
+
+        for wave in waves:
+            # Emit wave start event
+            await self._publish_parallel_event(
+                ParallelPlanEventType.WAVE_START,
+                {
+                    "wave_number": wave.wave_number,
+                    "subtask_ids": [st.id for st in wave.subtasks],
+                    "parallel_count": wave.parallel_count,
+                    "total_waves": len(waves),
+                },
+            )
+
+            wave_start_time = time.time()
+
+            # Execute all subtasks in this wave in parallel
+            if wave.parallel_count == 1:
+                # Single subtask - run directly
+                subtask = wave.subtasks[0]
+                success = await self._execute_subtask_with_timeout(subtask, context, plan)
+                results = [success]
+            else:
+                # Multiple subtasks - run in parallel with asyncio.gather
+                # CRITICAL: Each parallel subtask needs ISOLATED context AND orchestrator to avoid:
+                # 1. Message corruption: When subtasks share context.messages, one subtask's
+                #    tool_use can appear in another's messages without tool_result, causing
+                #    Anthropic API errors.
+                # 2. Event cross-contamination: When subtasks share event bus, all callbacks
+                #    receive all events, causing duplicated/interleaved token streams.
+                async def execute_with_event(
+                    st: SubTask,
+                    isolated_context: RunContext,
+                    isolated_orchestrator: "ReActOrchestrator",
+                ) -> bool:
+                    """Execute subtask with isolated context and orchestrator."""
+                    await self._publish_parallel_event(
+                        ParallelPlanEventType.PARALLEL_SUBTASK_START,
+                        {
+                            "subtask_id": st.id,
+                            "wave_number": wave.wave_number,
+                            "description": st.description,
+                        },
+                    )
+
+                    # Pass isolated orchestrator to prevent event cross-contamination
+                    success = await self._execute_subtask_with_timeout(
+                        st, isolated_context, plan, orchestrator=isolated_orchestrator
+                    )
+
+                    await self._publish_parallel_event(
+                        ParallelPlanEventType.PARALLEL_SUBTASK_COMPLETE,
+                        {
+                            "subtask_id": st.id,
+                            "wave_number": wave.wave_number,
+                            "success": success,
+                            "result": st.result if success else None,
+                            "error": st.error if not success else None,
+                        },
+                    )
+
+                    return success
+
+                # Create isolated contexts for each parallel subtask
+                # Each subtask gets a deep copy of messages to prevent cross-contamination
+                def create_isolated_context(base_context: RunContext) -> RunContext:
+                    """Create an isolated copy of the context for parallel execution."""
+                    return RunContext(
+                        deps=base_context.deps,  # Shared deps (read-only config)
+                        messages=copy.deepcopy(base_context.messages),  # Deep copy messages!
+                        retry=base_context.retry,
+                        metadata=base_context.metadata.copy(),  # Shallow copy metadata
+                    )
+
+                # Run all subtasks in parallel with isolated contexts AND orchestrators
+                # Each subtask gets its own event bus to prevent event cross-contamination
+                results = await asyncio.gather(
+                    *[
+                        execute_with_event(
+                            st,
+                            create_isolated_context(context),
+                            self._create_isolated_orchestrator(),
+                        )
+                        for st in wave.subtasks
+                    ],
+                    return_exceptions=True,
+                )
+
+            # Process results
+            wave_success = True
+            for i, result in enumerate(results):
+                subtask = wave.subtasks[i]
+                if isinstance(result, Exception):
+                    subtask.status = "failed"
+                    subtask.error = str(result)
+                    wave_success = False
+                    logger.error(f"Subtask {subtask.id} raised exception: {result}")
+                elif result:
+                    completed_ids.add(subtask.id)
+                else:
+                    wave_success = False
+
+            wave.execution_time = time.time() - wave_start_time
+
+            # Emit wave complete event
+            await self._publish_parallel_event(
+                ParallelPlanEventType.WAVE_COMPLETE,
+                {
+                    "wave_number": wave.wave_number,
+                    "completed_ids": list(completed_ids),
+                    "success": wave_success,
+                    "execution_time": wave.execution_time,
+                },
+            )
+
+            # Publish progress
+            await self._publish_event(
+                PlanExecuteEventType.PLAN_PROGRESS,
+                {
+                    "completed": len(completed_ids),
+                    "failed": sum(1 for st in plan.subtasks if st.status == "failed"),
+                    "total": len(plan.subtasks),
+                    "progress_percentage": (len(completed_ids) / len(plan.subtasks)) * 100,
+                    "current_wave": wave.wave_number,
+                    "total_waves": len(waves),
+                },
+            )
+
+            if not wave_success:
+                # Wave had failures - stop and trigger replan
+                logger.warning(f"Wave {wave.wave_number} had failures, stopping execution")
+                return False
+
+        logger.info(f"Parallel plan execution completed successfully in {len(waves)} waves")
+        return True
+
+    def _build_execution_waves(self, subtasks: List[SubTask]) -> List[ExecutionWave]:
+        """Build parallel execution waves using topological sort.
+
+        Groups subtasks into waves where:
+        - Wave 0: All subtasks with no dependencies
+        - Wave N: All subtasks whose dependencies are all in waves < N
+
+        Args:
+            subtasks: List of subtasks with dependencies
+
+        Returns:
+            List of ExecutionWave objects ordered by wave number
+        """
+        if not subtasks:
+            return []
+
+        # Build dependency graph
+        id_to_subtask = {st.id: st for st in subtasks}
+        remaining = set(st.id for st in subtasks)
+        completed_ids: Set[int] = set()
+        waves: List[ExecutionWave] = []
+        wave_number = 0
+
+        while remaining:
+            # Find subtasks whose dependencies are all completed
+            ready_ids = [
+                st_id for st_id in remaining
+                if all(dep_id in completed_ids for dep_id in id_to_subtask[st_id].dependencies)
+            ]
+
+            if not ready_ids:
+                # Cycle detected or invalid dependencies - shouldn't happen if validation passed
+                logger.error(f"No ready subtasks but {len(remaining)} remaining - possible cycle")
+                # Put remaining in final wave as fallback
+                ready_ids = list(remaining)
+
+            # Limit wave size to max_parallel_subtasks
+            wave_subtasks = [id_to_subtask[st_id] for st_id in ready_ids[:self.max_parallel_subtasks]]
+            remaining_ready = ready_ids[self.max_parallel_subtasks:]
+
+            wave = ExecutionWave(
+                wave_number=wave_number,
+                subtasks=wave_subtasks,
+                parallel_count=len(wave_subtasks),
+            )
+            waves.append(wave)
+
+            # Mark as completed and remove from remaining
+            for st in wave_subtasks:
+                completed_ids.add(st.id)
+                remaining.discard(st.id)
+
+            # If we had to limit wave size, remaining_ready goes to next wave
+            # (they'll be picked up in the next iteration)
+
+            wave_number += 1
+
+        logger.info(f"Built {len(waves)} execution waves from {len(subtasks)} subtasks")
+        for wave in waves:
+            logger.debug(f"  Wave {wave.wave_number}: {[st.id for st in wave.subtasks]} ({wave.parallel_count} parallel)")
+
+        return waves
+
+    async def _publish_parallel_event(
+        self, event_type: ParallelPlanEventType, data: Dict[str, Any]
+    ) -> None:
+        """Publish a parallel plan event.
+
+        Args:
+            event_type: Type of parallel plan event
+            data: Event data
+        """
+        event = ParallelPlanEvent(event_type=event_type, data=data)
+        await self.event_bus.publish(event)
+
     def _dependencies_met(self, subtask: SubTask, completed_ids: set) -> bool:
         """Check if all dependencies for a subtask are satisfied."""
         return all(dep_id in completed_ids for dep_id in subtask.dependencies)
@@ -787,6 +1082,7 @@ class PlanAndExecuteOrchestrator:
         context: RunContext,
         total_subtasks: int = 1,
         remaining_subtasks: Optional[list] = None,
+        orchestrator: Optional["ReActOrchestrator"] = None,
     ) -> bool:
         """Execute a single subtask.
 
@@ -795,6 +1091,8 @@ class PlanAndExecuteOrchestrator:
             context: Run context
             total_subtasks: Total number of subtasks in the plan (for conditional rendering)
             remaining_subtasks: Descriptions of upcoming subtasks (for boundary enforcement)
+            orchestrator: Optional isolated orchestrator for parallel execution.
+                         If None, uses self.subtask_orchestrator.
 
         Returns:
             True if successful, False otherwise
@@ -810,11 +1108,14 @@ class PlanAndExecuteOrchestrator:
                 {"subtask": subtask.to_dict(), "description": subtask.description},
             )
 
+        # Use provided orchestrator or fall back to self.subtask_orchestrator
+        active_orchestrator = orchestrator or self.subtask_orchestrator
+
         try:
-            if not self.subtask_orchestrator:
+            if not active_orchestrator:
                 raise ValueError(
                     "ReAct orchestrator is required for subtask execution. "
-                    "Please provide subtask_orchestrator in constructor."
+                    "Please provide subtask_orchestrator in constructor or pass orchestrator parameter."
                 )
 
             # Use ReAct orchestrator for subtask execution with event streaming
@@ -846,85 +1147,106 @@ class PlanAndExecuteOrchestrator:
                 scoped_query = subtask.description
 
             # Create event forwarder to bubble up ReAct events as PlanExecute events
-            def forward_react_event(react_event):
+            # Using async to ensure events are published in order (no fire-and-forget race conditions)
+            # Sequence counter ensures proper ordering of events when received out-of-order
+            # due to parallel execution (asyncio.gather doesn't guarantee event order)
+            subtask_sequence = 0
+
+            async def forward_react_event(react_event):
                 """Forward ReAct events from subtask as PlanExecute subtask events."""
+                nonlocal subtask_sequence
                 try:
+                    # Increment sequence for each event to ensure proper ordering
+                    subtask_sequence += 1
+                    current_sequence = subtask_sequence
+
                     # Convert ReActEvent to PlanExecuteEvent with subtask context
                     if react_event.event_type == ReActEventType.THINKING_CHUNK:
                         # Create subtask thinking chunk event
-                        asyncio.create_task(
-                            self._publish_event(
-                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                {
-                                    "subtask_id": subtask.id,
-                                    "delta": react_event.data.get("delta", ""),
-                                    "thought": react_event.data.get("content", ""),
-                                },
-                            )
+                        await self._publish_event(
+                            PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                            {
+                                "subtask_id": subtask.id,
+                                "sequence": current_sequence,
+                                "delta": react_event.data.get("delta", ""),
+                                "thought": react_event.data.get("content", ""),
+                            },
                         )
                     elif react_event.event_type == ReActEventType.ACTION_PLANNED:
                         # Tool is about to be called
                         tool_name = react_event.data.get("action", "unknown")
                         tool_args = react_event.data.get("action_input", {})
                         tool_description = react_event.data.get("tool_description")
-                        asyncio.create_task(
-                            self._publish_event(
-                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                {
-                                    "subtask_id": subtask.id,
-                                    "delta": "",
-                                    "is_tool": True,
-                                    "is_tool_planned": True,
-                                    "tool_name": tool_name,
-                                    "tool_args": tool_args,
-                                    "tool_description": tool_description,
-                                },
-                            )
+                        await self._publish_event(
+                            PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                            {
+                                "subtask_id": subtask.id,
+                                "sequence": current_sequence,
+                                "delta": "",
+                                "is_tool": True,
+                                "is_tool_planned": True,
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                                "tool_description": tool_description,
+                            },
                         )
                     elif react_event.event_type == ReActEventType.ACTION_EXECUTING:
                         # Tool is currently executing
                         tool_name = react_event.data.get("action", "unknown")
                         tool_args = react_event.data.get("action_input", {})
                         tool_description = react_event.data.get("tool_description")
-                        asyncio.create_task(
-                            self._publish_event(
-                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                {
-                                    "subtask_id": subtask.id,
-                                    "delta": "",
-                                    "is_tool": True,
-                                    "is_tool_executing": True,
-                                    "tool_name": tool_name,
-                                    "tool_args": tool_args,
-                                    "tool_description": tool_description,
-                                },
-                            )
+                        await self._publish_event(
+                            PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                            {
+                                "subtask_id": subtask.id,
+                                "sequence": current_sequence,
+                                "delta": "",
+                                "is_tool": True,
+                                "is_tool_executing": True,
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                                "tool_description": tool_description,
+                            },
                         )
                     elif react_event.event_type == ReActEventType.OBSERVATION:
                         # Tool execution result
                         observation = str(react_event.data.get("observation", ""))
                         tool_name = react_event.data.get("action", "unknown")
-                        asyncio.create_task(
-                            self._publish_event(
-                                PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
-                                {
-                                    "subtask_id": subtask.id,
-                                    "delta": observation,
-                                    "is_observation": True,
-                                    "tool_name": tool_name,
-                                    "success": react_event.data.get("success", True),
-                                },
-                            )
+                        await self._publish_event(
+                            PlanExecuteEventType.SUBTASK_THINKING_CHUNK,
+                            {
+                                "subtask_id": subtask.id,
+                                "sequence": current_sequence,
+                                "delta": observation,
+                                "is_observation": True,
+                                "tool_name": tool_name,
+                                "success": react_event.data.get("success", True),
+                            },
                         )
                 except Exception as e:
                     logger.error(f"Error forwarding ReAct event: {e}")
 
-            # Subscribe to subtask orchestrator's events
-            self.subtask_orchestrator.event_bus.subscribe(forward_react_event)
+            # Subscribe to orchestrator's events (using active_orchestrator for isolation)
+            active_orchestrator.event_bus.subscribe(forward_react_event)
 
             try:
+                # CRITICAL: Create fresh context for subtask execution
+                # The original context.messages contains the full user query, which would
+                # cause the subtask to try to complete the entire task instead of just
+                # its scoped part. We only keep system messages (assistant persona, etc.)
+                # and let the scoped_query be the only user message.
+                subtask_messages = [
+                    msg for msg in context.messages if msg.role == MessageRole.SYSTEM
+                ]
+                subtask_context = RunContext(
+                    deps=context.deps,
+                    messages=subtask_messages,
+                    retry=context.retry,
+                    metadata=context.metadata.copy() if context.metadata else {},
+                )
+
                 # Execute subtask with scoped query - events will be forwarded automatically
-                result = await self.subtask_orchestrator.execute(scoped_query, context)
+                result = await active_orchestrator.execute(scoped_query, subtask_context)
 
                 subtask.result = result.final_answer
                 subtask.cost = result.total_cost
@@ -932,7 +1254,7 @@ class PlanAndExecuteOrchestrator:
                 subtask.status = "completed"
             finally:
                 # Unsubscribe to avoid memory leaks
-                self.subtask_orchestrator.event_bus.unsubscribe(forward_react_event)
+                active_orchestrator.event_bus.unsubscribe(forward_react_event)
 
             subtask.execution_time = time.time() - start_time
 
@@ -1206,4 +1528,8 @@ Provide a clear, well-formatted final answer that directly addresses the user's 
 
     def get_current_status(self) -> Dict[str, Any]:
         """Get current execution status."""
-        return {"agent_type": "plan_and_execute_orchestrator"}
+        return {
+            "agent_type": "plan_and_execute_orchestrator",
+            "parallel_execution": self.parallel_execution,
+            "max_parallel_subtasks": self.max_parallel_subtasks,
+        }

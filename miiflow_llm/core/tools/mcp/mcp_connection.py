@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -115,9 +116,16 @@ class NativeMCPServerConfig:
 
     def to_openai_format(self) -> Dict[str, Any]:
         """Convert to OpenAI MCP tool format (for Responses API)."""
+        # OpenAI requires server_label to start with a letter and only contain
+        # letters, digits, '-' and '_'. Sanitize the name accordingly.
+        sanitized_label = re.sub(r"[^a-zA-Z0-9_-]", "_", self.name)
+        # Ensure it starts with a letter
+        if sanitized_label and not sanitized_label[0].isalpha():
+            sanitized_label = "mcp_" + sanitized_label
+
         config: Dict[str, Any] = {
             "type": "mcp",
-            "server_label": self.name,
+            "server_label": sanitized_label,
             "server_url": self.url,
             "require_approval": self.require_approval,
         }

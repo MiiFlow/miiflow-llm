@@ -2,6 +2,22 @@
 
 All notable changes to miiflow-llm will be documented here.
 
+## [0.5.0] - 2026-01-11
+
+### Added
+- **Dynamic Multi-Agent System**: New hierarchical agent spawning system with specialized subagents
+  - `TaskTool`: Spawn specialized subagents (explorer, researcher, implementer, reviewer, planner) during execution with nesting depth limits and context isolation
+  - `SubAgentRegistry`: Central registry for subagent types with task-based matching and priority sorting
+  - `DynamicSubAgentConfig`: Enhanced configuration with per-subagent model selection, tool scoping, and timeout control
+  - `ModelSelector`: Intelligent model selection (haiku/sonnet/opus) based on task type, complexity, and budget constraints with cost estimation
+- **Tool Execution Callbacks**: New `TOOL_EXECUTED` callback event type with `@on_tool_executed` decorator for tracking tool name, inputs, output, and execution time
+- **Post-Tool Response Streaming**: Agent now streams the LLM response after tool execution instead of blocking
+
+### Changed
+- Unified Plan & Execute orchestrator: `PlanAndExecuteOrchestrator` now supports `parallel_execution=True` flag, replacing the separate `ParallelPlanOrchestrator`
+- Query classifier improvements for better routing of simple use cases
+- MCP connection now supports auto-reload for improved development experience
+
 ## [0.4.0] - 2025-12-30
 
 ### Added

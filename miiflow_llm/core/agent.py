@@ -689,7 +689,7 @@ class Agent(Generic[Deps, Result]):
         """
         from .react import ReActFactory
         from .react.events import EventBus
-        from .react.parallel_plan_orchestrator import ParallelPlanOrchestrator
+        from .react.plan_execute_orchestrator import PlanAndExecuteOrchestrator
         from .react.safety import SafetyManager
         from .react.tool_executor import AgentToolExecutor
 
@@ -711,13 +711,14 @@ class Agent(Generic[Deps, Result]):
             message_id=message_id,
         )
 
-        # Create Parallel Plan orchestrator
-        orchestrator = ParallelPlanOrchestrator(
+        # Create Plan&Execute orchestrator with parallel execution enabled
+        orchestrator = PlanAndExecuteOrchestrator(
             tool_executor=tool_executor,
             event_bus=event_bus,
             safety_manager=safety_manager,
             subtask_orchestrator=react_orchestrator,
             max_replans=max_replans,
+            parallel_execution=True,  # Enable parallel wave execution
             max_parallel_subtasks=5,
         )
 
@@ -952,15 +953,26 @@ class Agent(Generic[Deps, Result]):
                 yield {"event": "tools_complete", "data": {}}
                 # Re-filter messages after tool execution (tool results added to context.messages)
                 llm_messages = self._prepare_messages_for_llm(context.messages)
-                final_response = await self.client.achat(
+
+                # Stream the post-tool LLM response
+                post_tool_buffer = ""
+                async for chunk in self.client.astream_chat(
                     messages=llm_messages,
                     tools=None,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                     json_schema=self.json_schema,
-                )
-                context.messages.append(final_response.message)
-                result = final_response.message.content
+                ):
+                    if chunk.delta:
+                        post_tool_buffer += chunk.delta
+                        yield {"event": "llm_chunk", "data": {"delta": chunk.delta, "content": post_tool_buffer}}
+
+                    if chunk.finish_reason:
+                        break
+
+                final_message = Message(role=MessageRole.ASSISTANT, content=post_tool_buffer)
+                context.messages.append(final_message)
+                result = post_tool_buffer
             else:
                 result = buffer
 

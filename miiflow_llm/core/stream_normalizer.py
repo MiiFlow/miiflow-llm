@@ -398,13 +398,53 @@ class GeminiStreamNormalizer(BaseStreamNormalizer):
         delta = ""
         finish_reason = None
         usage = None
+        tool_calls = None
 
         try:
             if hasattr(chunk, "candidates") and chunk.candidates:
                 candidate = chunk.candidates[0]
 
                 if hasattr(candidate, "content") and candidate.content.parts:
-                    delta = candidate.content.parts[0].text
+                    for part in candidate.content.parts:
+                        # Check for function_call - be careful with protobuf objects
+                        func_call = getattr(part, "function_call", None)
+                        if func_call is not None:
+                            # Get name - may be a string or protobuf field
+                            func_name = getattr(func_call, "name", None)
+                            # Ensure we have a non-empty string name
+                            if func_name:
+                                func_name = str(func_name)
+                                # Skip if name is empty after conversion
+                                if not func_name.strip():
+                                    continue
+
+                                # Get args - may be a dict, protobuf MapComposite, or None
+                                func_args = getattr(func_call, "args", None)
+                                if func_args is not None:
+                                    try:
+                                        # Try to convert to dict (works for MapComposite)
+                                        func_args = dict(func_args)
+                                    except (TypeError, ValueError):
+                                        func_args = {}
+                                else:
+                                    func_args = {}
+
+                                # Format as OpenAI-compatible tool call structure
+                                tool_call = {
+                                    "id": f"gemini_{func_name}",  # Gemini doesn't provide IDs
+                                    "type": "function",
+                                    "function": {
+                                        "name": func_name,
+                                        "arguments": func_args,
+                                    },
+                                }
+                                if tool_calls is None:
+                                    tool_calls = []
+                                tool_calls.append(tool_call)
+                        # Check for text content
+                        text_content = getattr(part, "text", None)
+                        if text_content:
+                            delta += text_content
 
                 if hasattr(candidate, "finish_reason") and candidate.finish_reason:
                     finish_reason = self._get_finish_reason_name(candidate.finish_reason)
@@ -417,7 +457,7 @@ class GeminiStreamNormalizer(BaseStreamNormalizer):
             else:
                 delta = str(chunk) if chunk else ""
 
-        return self._build_chunk(delta, finish_reason, usage, None)
+        return self._build_chunk(delta, finish_reason, usage, tool_calls)
 
     def _get_finish_reason_name(self, finish_reason: Any) -> Optional[str]:
         """Safely extract finish_reason name.

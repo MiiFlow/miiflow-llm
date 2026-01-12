@@ -47,6 +47,23 @@ from .safety import StopCondition, SafetyManager
 # Execution state
 from .execution import ExecutionState
 
+# Multi-agent components
+from .multi_agent_orchestrator import MultiAgentOrchestrator
+from .subagent_registry import (
+    DynamicSubAgentConfig,
+    SubAgentRegistry,
+    get_global_registry,
+)
+from .model_selector import (
+    ModelSelector,
+    ModelTier,
+    TaskComplexity,
+    ComplexityDetector,
+    select_model_for_task,
+    detect_complexity,
+)
+from .task_tool import TaskTool, TaskToolResult, create_task_tool
+
 __all__ = [
     # Main interfaces
     "ReActOrchestrator",
@@ -81,6 +98,20 @@ __all__ = [
     "SafetyManager",
     # Execution state
     "ExecutionState",
+    # Multi-agent components
+    "MultiAgentOrchestrator",
+    "DynamicSubAgentConfig",
+    "SubAgentRegistry",
+    "get_global_registry",
+    "ModelSelector",
+    "ModelTier",
+    "TaskComplexity",
+    "ComplexityDetector",
+    "select_model_for_task",
+    "detect_complexity",
+    "TaskTool",
+    "TaskToolResult",
+    "create_task_tool",
 ]
 
-__version__ = "0.4.1"  # Added execution module
+__version__ = "0.5.0"  # Added dynamic multi-agent components

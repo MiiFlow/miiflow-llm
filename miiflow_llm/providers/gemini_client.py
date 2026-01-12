@@ -1,8 +1,29 @@
 """Google Gemini client implementation."""
 
 import asyncio
+import re
 import warnings
 from typing import Any, AsyncIterator, Dict, List, Optional
+
+
+def _sanitize_tool_name_for_gemini(name: str) -> str:
+    """Sanitize tool name to match Gemini's function name requirements.
+
+    Gemini requires function names to:
+    - Start with a letter or underscore
+    - Contain only: a-z, A-Z, 0-9, _, ., :, -
+    - Maximum length of 64 characters
+    """
+    # Replace invalid characters with underscores
+    sanitized = re.sub(r"[^a-zA-Z0-9_.\-:]", "_", name)
+    # Collapse multiple underscores
+    sanitized = re.sub(r"_+", "_", sanitized)
+    # Ensure starts with letter or underscore
+    if sanitized and not re.match(r"^[a-zA-Z_]", sanitized):
+        sanitized = "_" + sanitized
+    # Strip trailing underscores and limit length
+    sanitized = sanitized.rstrip("_")[:64]
+    return sanitized or "_unnamed"
 
 try:
     import google.generativeai as genai
@@ -82,6 +103,9 @@ class GeminiClient(ModelClient):
 
         # Stream normalizer for unified streaming handling
         self._stream_normalizer = GeminiStreamNormalizer()
+
+        # Tool name mapping: sanitized_name -> original_name
+        self._tool_name_mapping: Dict[str, str] = {}
 
     def _get_finish_reason_name(self, finish_reason: Any) -> Optional[str]:
         """Safely extract finish_reason name, handling both enum and int values.
@@ -402,17 +426,29 @@ class GeminiClient(ModelClient):
             # Prepare tools for Gemini (if provided)
             gemini_tools = None
             if tools:
-                # Gemini expects tools wrapped in a Tool object
+                # Clear previous mapping
+                self._tool_name_mapping.clear()
 
+                # Gemini expects tools wrapped in a Tool object
                 function_declarations = []
                 for tool in tools:
+                    original_name = tool["name"]
+                    sanitized_name = _sanitize_tool_name_for_gemini(original_name)
+
+                    # Store mapping if name was changed
+                    if sanitized_name != original_name:
+                        self._tool_name_mapping[sanitized_name] = original_name
+
+                    # Normalize parameters to remove unsupported fields (minimum, maximum, etc.)
+                    normalized_parameters = normalize_json_schema(
+                        tool["parameters"], SchemaMode.GEMINI_COMPAT
+                    )
                     func_decl = FunctionDeclaration(
-                        name=tool["name"],
+                        name=sanitized_name,
                         description=tool["description"],
-                        parameters=tool["parameters"],
+                        parameters=normalized_parameters,
                     )
                     function_declarations.append(func_decl)
-
                 gemini_tools = [Tool(function_declarations=function_declarations)]
 
             # Create model with system instruction if provided
@@ -440,9 +476,16 @@ class GeminiClient(ModelClient):
                 for part in response.candidates[0].content.parts:
                     if hasattr(part, "function_call") and part.function_call:
                         func_call = part.function_call
+                        # Map sanitized name back to original
+                        tool_name = self._tool_name_mapping.get(func_call.name, func_call.name)
+                        # Format as OpenAI-compatible tool call structure
                         tool_call = {
-                            "name": func_call.name,
-                            "arguments": dict(func_call.args) if func_call.args else {},
+                            "id": f"gemini_{tool_name}",
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": dict(func_call.args) if func_call.args else {},
+                            },
                         }
                         tool_calls.append(tool_call)
                     elif hasattr(part, "text") and part.text:
@@ -549,6 +592,33 @@ class GeminiClient(ModelClient):
 
             generation_config = genai.GenerationConfig(**generation_config_params)
 
+            # Prepare tools for Gemini (if provided)
+            gemini_tools = None
+            if tools:
+                # Clear previous mapping
+                self._tool_name_mapping.clear()
+
+                function_declarations = []
+                for tool in tools:
+                    original_name = tool["name"]
+                    sanitized_name = _sanitize_tool_name_for_gemini(original_name)
+
+                    # Store mapping if name was changed
+                    if sanitized_name != original_name:
+                        self._tool_name_mapping[sanitized_name] = original_name
+
+                    # Normalize parameters to remove unsupported fields (minimum, maximum, etc.)
+                    normalized_parameters = normalize_json_schema(
+                        tool["parameters"], SchemaMode.GEMINI_COMPAT
+                    )
+                    func_decl = FunctionDeclaration(
+                        name=sanitized_name,
+                        description=tool["description"],
+                        parameters=normalized_parameters,
+                    )
+                    function_declarations.append(func_decl)
+                gemini_tools = [Tool(function_declarations=function_declarations)]
+
             # Create model with system instruction if provided
             # Gemini requires system_instruction to be set at model creation time
             if system_instruction:
@@ -559,13 +629,38 @@ class GeminiClient(ModelClient):
             else:
                 model = self.client
 
-            response_stream = await asyncio.to_thread(
-                model.generate_content,
-                prompt,
-                generation_config=generation_config,
-                safety_settings=self.safety_settings,
-                stream=True,
-            )
+            # Build kwargs for generate_content - only include tools if provided
+            generate_kwargs = {
+                "generation_config": generation_config,
+                "safety_settings": self.safety_settings,
+                "stream": True,
+            }
+            if gemini_tools:
+                generate_kwargs["tools"] = gemini_tools
+
+            try:
+                response_stream = await asyncio.to_thread(
+                    model.generate_content,
+                    prompt,
+                    **generate_kwargs,
+                )
+            except Exception as stream_error:
+                # Streaming failed - try non-streaming to get actual error message
+                try:
+                    generate_kwargs["stream"] = False
+                    await asyncio.to_thread(
+                        model.generate_content,
+                        prompt,
+                        **generate_kwargs,
+                    )
+                except Exception as detail_error:
+                    raise ProviderError(
+                        f"Gemini API error: {detail_error}", provider="gemini"
+                    )
+                # If non-streaming succeeds, re-raise original streaming error
+                raise ProviderError(
+                    f"Gemini streaming error: {stream_error}", provider="gemini"
+                )
 
             # Reset stream state for new streaming session
             self._stream_normalizer.reset_state()
@@ -573,7 +668,20 @@ class GeminiClient(ModelClient):
             for chunk in response_stream:
                 normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
 
+                # Map tool names back to original names
+                if normalized_chunk.tool_calls:
+                    for tool_call in normalized_chunk.tool_calls:
+                        # Name is inside the "function" object
+                        func_data = tool_call.get("function", {})
+                        if func_data.get("name"):
+                            original_name = self._tool_name_mapping.get(
+                                func_data["name"], func_data["name"]
+                            )
+                            func_data["name"] = original_name
+
                 yield normalized_chunk
 
+        except ProviderError:
+            raise
         except Exception as e:
             raise ProviderError(f"Gemini streaming error: {e}", provider="gemini")

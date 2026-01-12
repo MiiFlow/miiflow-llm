@@ -38,6 +38,7 @@ class CallbackEventType(Enum):
     ON_ERROR = "on_error"  # On LLM call error
     AGENT_RUN_START = "agent_run_start"  # When agent execution begins
     AGENT_RUN_END = "agent_run_end"  # When agent execution completes
+    TOOL_EXECUTED = "tool_executed"  # After a tool is executed (with tool info)
 
 
 @dataclass
@@ -91,6 +92,12 @@ class CallbackEvent:
     # Agent information (for AGENT_RUN_START, AGENT_RUN_END)
     agent_type: Optional[str] = None
     query: Optional[str] = None
+
+    # Tool execution information (for TOOL_EXECUTED)
+    tool_name: Optional[str] = None
+    tool_inputs: Optional[Dict[str, Any]] = None
+    tool_output: Optional[Any] = None
+    tool_execution_time_ms: Optional[float] = None
 
     # Context from caller
     context: Optional[CallbackContext] = None
@@ -252,4 +259,10 @@ def on_agent_run_start(callback: CallbackFn) -> CallbackFn:
 def on_agent_run_end(callback: CallbackFn) -> CallbackFn:
     """Decorator to register an AGENT_RUN_END callback."""
     register(CallbackEventType.AGENT_RUN_END, callback)
+    return callback
+
+
+def on_tool_executed(callback: CallbackFn) -> CallbackFn:
+    """Decorator to register a TOOL_EXECUTED callback."""
+    register(CallbackEventType.TOOL_EXECUTED, callback)
     return callback

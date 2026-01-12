@@ -1,8 +1,11 @@
 """Clean tool executor adapter."""
 
 import logging
-from typing import List
+import time
+from typing import List, Optional
 
+from ..callbacks import CallbackEvent, CallbackEventType, get_global_registry
+from ..callback_context import get_callback_context
 from ..tools import ToolResult
 
 logger = logging.getLogger(__name__)
@@ -17,10 +20,55 @@ class AgentToolExecutor:
         self._client = agent.client
 
     async def execute_tool(self, tool_name: str, inputs: dict, context=None) -> ToolResult:
-        """Execute tool with context injection if context is provided."""
+        """Execute tool with context injection if context is provided.
+
+        Emits a TOOL_EXECUTED callback event after execution for billing/tracking.
+        """
+        start_time = time.time()
+
         if context is not None:
-            return await self._tool_registry.execute_safe_with_context(tool_name, context, **inputs)
-        return await self._tool_registry.execute_safe(tool_name, **inputs)
+            result = await self._tool_registry.execute_safe_with_context(tool_name, context, **inputs)
+        else:
+            result = await self._tool_registry.execute_safe(tool_name, **inputs)
+
+        execution_time_ms = (time.time() - start_time) * 1000
+
+        # Emit TOOL_EXECUTED callback for billing/tracking
+        await self._emit_tool_executed_callback(
+            tool_name=tool_name,
+            inputs=inputs,
+            result=result,
+            execution_time_ms=execution_time_ms,
+        )
+
+        return result
+
+    async def _emit_tool_executed_callback(
+        self,
+        tool_name: str,
+        inputs: dict,
+        result: ToolResult,
+        execution_time_ms: float,
+    ) -> None:
+        """Emit a TOOL_EXECUTED callback event."""
+        # Get current callback context if set
+        callback_context = get_callback_context()
+
+        event = CallbackEvent(
+            event_type=CallbackEventType.TOOL_EXECUTED,
+            tool_name=tool_name,
+            tool_inputs=inputs,
+            tool_output=result.output if result else None,
+            tool_execution_time_ms=execution_time_ms,
+            success=result.success if result else False,
+            context=callback_context,
+        )
+
+        try:
+            registry = get_global_registry()
+            await registry.emit(event)
+        except Exception as e:
+            logger.warning(f"Failed to emit TOOL_EXECUTED callback: {e}")
 
     async def execute_without_tools(self, messages: List, temperature: float = None):
         """Execute LLM call with tools temporarily disabled."""

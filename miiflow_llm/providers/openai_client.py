@@ -271,9 +271,23 @@ class OpenAIClient(ModelClient):
             # Build tools array with MCP servers
             response_tools = []
 
-            # Add regular function tools
+            # Add regular function tools - convert from Chat Completions to Responses API format
+            # Chat Completions: {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
+            # Responses API:    {"type": "function", "name": ..., "description": ..., "parameters": ...}
             if tools:
-                response_tools.extend(tools)
+                for tool in tools:
+                    if tool.get("type") == "function" and "function" in tool:
+                        # Convert nested format to flat format for Responses API
+                        func_def = tool["function"]
+                        response_tools.append({
+                            "type": "function",
+                            "name": func_def.get("name"),
+                            "description": func_def.get("description", ""),
+                            "parameters": func_def.get("parameters", {}),
+                        })
+                    else:
+                        # Already in correct format or different tool type
+                        response_tools.append(tool)
 
             # Add MCP servers as native MCP tools
             if mcp_servers:
@@ -503,6 +517,7 @@ class OpenAIClient(ModelClient):
                 "model": self.model,
                 "messages": openai_messages,
                 "stream": True,
+                "stream_options": {"include_usage": True},
             }
 
             if supports_temperature(self.model):
@@ -535,7 +550,21 @@ class OpenAIClient(ModelClient):
             self._stream_normalizer.reset_state()
 
             async for chunk in stream:
+                # Handle final usage-only chunk (has usage but empty choices)
+                # This is sent when stream_options.include_usage=True
                 if not chunk.choices:
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage = TokenCount(
+                            prompt_tokens=chunk.usage.prompt_tokens,
+                            completion_tokens=chunk.usage.completion_tokens,
+                            total_tokens=chunk.usage.total_tokens,
+                        )
+                        yield StreamChunk(
+                            content=self._stream_normalizer._state.accumulated_content,
+                            delta="",
+                            finish_reason=None,
+                            usage=usage,
+                        )
                     continue
 
                 normalized_chunk = self._stream_normalizer.normalize_chunk(chunk)
@@ -591,9 +620,23 @@ class OpenAIClient(ModelClient):
             # Build tools array with MCP servers
             response_tools = []
 
-            # Add regular function tools
+            # Add regular function tools - convert from Chat Completions to Responses API format
+            # Chat Completions: {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
+            # Responses API:    {"type": "function", "name": ..., "description": ..., "parameters": ...}
             if tools:
-                response_tools.extend(tools)
+                for tool in tools:
+                    if tool.get("type") == "function" and "function" in tool:
+                        # Convert nested format to flat format for Responses API
+                        func_def = tool["function"]
+                        response_tools.append({
+                            "type": "function",
+                            "name": func_def.get("name"),
+                            "description": func_def.get("description", ""),
+                            "parameters": func_def.get("parameters", {}),
+                        })
+                    else:
+                        # Already in correct format or different tool type
+                        response_tools.append(tool)
 
             # Add MCP servers as native MCP tools
             if mcp_servers:

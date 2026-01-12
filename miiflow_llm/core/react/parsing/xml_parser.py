@@ -3,7 +3,7 @@
 This parser handles XML-tagged ReAct responses in a streaming fashion,
 allowing for incremental parsing without buffering the entire response.
 
-Format:
+Supported formats:
     <thinking>
     Reasoning about the task
     </thinking>
@@ -15,6 +15,13 @@ Format:
     <answer>
     Final answer content
     </answer>
+
+Also suppresses (when native tool calling is active):
+    <function_calls>
+    <invoke name="tool_name">
+    <parameter name="param">value</parameter>
+    </invoke>
+    </function_calls>
 """
 
 import json
@@ -25,6 +32,27 @@ from enum import Enum
 from typing import Any, Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
+
+# XML patterns to suppress from display (redundant when native tool calling is active)
+# These are stripped from the buffer to prevent them from appearing in final output
+SUPPRESS_PATTERNS = [
+    # Anthropic's XML function calling format
+    (r'<function_calls>.*?</function_calls>', 'function_calls'),
+    # Alternative formats
+    (r'<tool_use>.*?</tool_use>', 'tool_use'),
+]
+
+# Tags that require holdback during streaming (wait for complete tag before processing)
+HOLDBACK_TAGS = [
+    '<function_calls',
+    '</function_calls',
+    '<invoke',
+    '</invoke',
+    '<tool_use',
+    '</tool_use',
+    '<',
+    '</',
+]
 
 
 class ParseEventType(Enum):
@@ -49,6 +77,9 @@ class XMLReActParser:
 
     This parser processes XML-tagged ReAct responses incrementally,
     allowing for real-time event emission without waiting for complete response.
+
+    It also suppresses redundant XML formats (like <function_calls>) that some
+    LLMs output even when using native tool calling APIs.
     """
 
     def __init__(self):
@@ -64,6 +95,45 @@ class XMLReActParser:
         self.thinking_complete = False
         self.answer_started = False
         self.has_parsed_content = False  # Track if we've parsed any valid content
+        self.in_suppressed_block = False  # Track if we're inside a block being suppressed
+
+    def _suppress_redundant_xml(self) -> bool:
+        """Suppress redundant XML blocks from the buffer.
+
+        When LLMs use native tool calling but also output XML descriptions,
+        we need to strip the XML to prevent it from appearing in the output.
+
+        Returns:
+            True if content was suppressed, False otherwise
+        """
+        suppressed = False
+
+        for pattern, tag_name in SUPPRESS_PATTERNS:
+            match = re.search(pattern, self.buffer, re.DOTALL | re.IGNORECASE)
+            if match:
+                # Remove the matched content from buffer
+                self.buffer = self.buffer[:match.start()] + self.buffer[match.end():]
+                logger.debug(f"Suppressed <{tag_name}> XML block ({match.end() - match.start()} chars)")
+                suppressed = True
+
+        return suppressed
+
+    def _has_partial_suppress_tag(self) -> bool:
+        """Check if buffer ends with a partial tag that should be suppressed.
+
+        This prevents emitting partial XML tags like '<function_ca' as text.
+
+        Returns:
+            True if we should hold back the buffer
+        """
+        # Check for potential partial tags at the end of buffer
+        for tag in HOLDBACK_TAGS:
+            # Check if buffer ends with start of this tag
+            for i in range(1, len(tag) + 1):
+                if self.buffer.endswith(tag[:i]):
+                    return True
+
+        return False
 
     def parse_streaming(self, chunk: str) -> Iterator[ParseEvent]:
         """Parse XML chunks incrementally and yield parse events.
@@ -75,6 +145,19 @@ class XMLReActParser:
             ParseEvent: Events detected in the chunk
         """
         self.buffer += chunk
+
+        # Suppress redundant XML blocks (e.g., <function_calls> when using native tool calling)
+        # This must happen before other processing to prevent partial XML from being emitted
+        self._suppress_redundant_xml()
+
+        # Check if we're waiting for a potentially suppressible tag to complete
+        # This prevents emitting partial tags like "<function_ca" as text
+        if self._has_partial_suppress_tag() and not self.in_thinking and not self.in_answer:
+            # Check if we have an incomplete <function_calls> or similar block
+            if '<function_calls' in self.buffer and '</function_calls>' not in self.buffer:
+                return  # Wait for complete block before processing
+            if '<invoke' in self.buffer and '</invoke>' not in self.buffer:
+                return  # Wait for complete block
 
         # Handle thinking section with proper streaming
         if not self.thinking_complete:
@@ -249,6 +332,17 @@ class XMLReActParser:
         Yields:
             ParseEvent: Any remaining events from buffered content
         """
+        # Final cleanup: suppress any remaining redundant XML blocks
+        # This catches incomplete blocks that were waiting for closing tags
+        self._suppress_redundant_xml()
+
+        # Also strip any partial/incomplete suppressed tags from the buffer
+        # This prevents partial XML like "<function_calls" from appearing in output
+        self.buffer = re.sub(r'<function_calls[^>]*$', '', self.buffer)
+        self.buffer = re.sub(r'<invoke[^>]*$', '', self.buffer)
+        self.buffer = re.sub(r'<tool_use[^>]*$', '', self.buffer)
+        self.buffer = re.sub(r'<parameter[^>]*$', '', self.buffer)
+
         # If we're in answer mode and have buffered content, flush it
         if self.in_answer and self.buffer:
             # Check one more time for closing tag
@@ -336,19 +430,26 @@ class XMLReActParser:
         """
         self.reset()
 
+        # Strip redundant XML blocks before parsing
+        # This removes <function_calls> and similar blocks that are redundant
+        # when native tool calling is active
+        cleaned_response = response
+        for pattern, tag_name in SUPPRESS_PATTERNS:
+            cleaned_response = re.sub(pattern, '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
+
         result = {
             "thought": None,
             "action_type": None,
             "action": None,
             "action_input": None,
             "answer": None,
-            "original_response": response
+            "original_response": response  # Keep original for debugging
         }
 
-        # Extract thinking
+        # Extract thinking (use cleaned_response to avoid parsing suppressed content)
         thinking_match = re.search(
             r'<thinking>(.*?)</thinking>',
-            response,
+            cleaned_response,
             re.DOTALL | re.IGNORECASE
         )
         if thinking_match:
@@ -357,7 +458,7 @@ class XMLReActParser:
         # Extract tool call
         tool_call_match = re.search(
             r'<tool_call\s+name=["\']([^"\']+)["\']>(.*?)</tool_call>',
-            response,
+            cleaned_response,
             re.DOTALL | re.IGNORECASE
         )
         if tool_call_match:
@@ -374,7 +475,7 @@ class XMLReActParser:
         # Extract answer
         answer_match = re.search(
             r'<answer>(.*?)</answer>',
-            response,
+            cleaned_response,
             re.DOTALL | re.IGNORECASE
         )
         if answer_match:
@@ -386,7 +487,7 @@ class XMLReActParser:
             raise ValueError(
                 f"No valid ReAct XML tags found in response. "
                 f"Expected <thinking>, <tool_call>, or <answer> tags. "
-                f"Response: {response[:200]}..."
+                f"Response: {cleaned_response[:200]}..."
             )
 
         return result

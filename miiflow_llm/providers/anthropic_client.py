@@ -643,12 +643,16 @@ class AnthropicClient(ModelClient):
                     self.client.messages.create(**request_params), timeout=self.timeout
                 )
 
-            # Reset stream state for new streaming session
-            self._stream_normalizer.reset_state()
+            # Create a NEW normalizer instance for each streaming session
+            # This prevents race conditions when multiple streams run in parallel
+            # (e.g., multi-agent parallel subagent execution)
+            # Previously, we used self._stream_normalizer.reset_state() but shared
+            # state causes corruption when streams interleave.
+            stream_normalizer = AnthropicStreamNormalizer(self._tool_name_mapping)
 
             async for event in stream:
                 # Normalize Anthropic events to StreamChunk
-                normalized_chunk = self._stream_normalizer.normalize_chunk(event)
+                normalized_chunk = stream_normalizer.normalize_chunk(event)
 
                 # Only yield if there's actual content or metadata to send
                 if (

@@ -787,6 +787,18 @@ Classification (respond with ONLY one word - either "THINKING" or "ANSWER"):"""
                 EventFactory.observation(state.current_step, step.observation, step.action, False)
             )
 
+            # Add tool result to context even on exception (required for native tool calling)
+            # Without this, Anthropic API will reject subsequent calls with:
+            # "tool_use ids were found without tool_result blocks"
+            if tool_call_id:
+                observation_message = Message(
+                    role=MessageRole.TOOL, content=step.observation, tool_call_id=tool_call_id
+                )
+                context.messages.append(observation_message)
+                logger.debug(
+                    f"Step {state.current_step} - Added error tool result to context with ID: {tool_call_id}"
+                )
+
     async def _execute_tool(self, step: ReActStep, context: RunContext):
         """Execute tool with proper context injection."""
         # Tool name should already be resolved by _handle_tool_action

@@ -232,7 +232,39 @@ def _normalize_gemini_compat(obj: Dict[str, Any]) -> Dict[str, Any]:
         return obj
 
     # Fields that Gemini doesn't support
-    unsupported_fields = {"additionalProperties", "$schema", "definitions", "$defs", "default"}
+    unsupported_fields = {
+        "additionalProperties",
+        "$schema",
+        "definitions",
+        "$defs",
+        "default",
+        # Numeric constraints not supported by Gemini Schema
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        # String constraints not supported by Gemini Schema
+        "minLength",
+        "maxLength",
+        "pattern",
+        # Array constraints not supported by Gemini Schema
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        # Object constraints not supported by Gemini Schema
+        "minProperties",
+        "maxProperties",
+        # Other unsupported fields
+        "examples",
+        "const",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
+        "$id",
+        "$ref",
+        "$comment",
+    }
 
     normalized: Dict[str, Any] = {}
 

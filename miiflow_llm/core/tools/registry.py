@@ -392,6 +392,27 @@ class ToolRegistry:
         tool = self.tools[resolved_name]
         start_time = time.time()
 
+        # Validate kwargs against the tool's schema - reject unknown parameters
+        # so the LLM can correct its tool call
+        if hasattr(tool, "definition") and hasattr(tool.definition, "parameters"):
+            valid_params = set(tool.definition.parameters.keys())
+            unknown_params = set(kwargs.keys()) - valid_params
+            if unknown_params:
+                error_msg = (
+                    f"Tool '{resolved_name}' received unknown parameter(s): {sorted(unknown_params)}. "
+                    f"Valid parameters are: {sorted(valid_params)}"
+                )
+                logger.warning(error_msg)
+                return ToolResult(
+                    name=resolved_name,
+                    input=kwargs,
+                    output=None,
+                    error=error_msg,
+                    success=False,
+                    execution_time=0.0,
+                    metadata={"error_type": "invalid_parameters", "unknown_params": list(unknown_params)},
+                )
+
         try:
             if hasattr(tool, "fn"):
                 if asyncio.iscoroutinefunction(tool.fn):
