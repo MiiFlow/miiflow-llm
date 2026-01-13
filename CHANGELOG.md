@@ -2,6 +2,11 @@
 
 All notable changes to miiflow-llm will be documented here.
 
+## [0.5.1] - 2026-01-12
+
+### Fixed
+- Fixed issue with Bedrock client when using MCP
+
 ## [0.5.0] - 2026-01-11
 
 ### Added

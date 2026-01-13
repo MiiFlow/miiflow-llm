@@ -67,6 +67,20 @@ class BedrockClient(AnthropicClient):
         """
         return supports_structured_outputs(self.model)
 
+    def _supports_native_mcp(self) -> bool:
+        """
+        Check if Bedrock supports native MCP.
+
+        Native MCP (mcp-client-2025-04-04 beta) is an Anthropic API-specific feature
+        that allows server-side MCP execution. This feature is NOT supported by
+        Amazon Bedrock - attempting to use it results in:
+        "extraneous key [mcp_servers] is not permitted"
+
+        Returns:
+            False - Bedrock does not support native MCP
+        """
+        return False
+
     # All other methods (achat, astream_chat, convert_schema_to_provider_format,
     # convert_message_to_provider_format, _prepare_messages, etc.) are inherited
     # from AnthropicClient and work as-is since Bedrock uses the same API!
